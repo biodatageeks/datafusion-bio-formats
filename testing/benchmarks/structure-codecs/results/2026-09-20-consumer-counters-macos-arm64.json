@@ -1,0 +1,2353 @@
+{
+  "scope": "separate untimed EXPLAIN ANALYZE checks; exact small source/entry counts, rounded displayed row/payload counts; logical encoded bytes exclude sidecars and physical filesystem I/O; expected_counts are fixture-derived exact totals",
+  "results": [
+    {
+      "workers": 1,
+      "native": [
+        {
+          "dataset": "cif_1ubq",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "660"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=660, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_1ubq",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "42.24 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=42.24 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "4.86 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=4.86 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "602"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=602, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "8.69 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=8.69 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "1.04 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=1.04 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "16.38 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=16.38 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "4.10 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=4.10 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "2.43 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=2, partitions=1, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=2.43 K, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "293"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=2, partitions=1, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=293, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "27.13 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=24, partitions=1, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=27.13 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "3.47 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=24, partitions=1, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=3.47 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        }
+      ],
+      "rust": [
+        {
+          "dataset": "cif_1ubq",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "660"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=660, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_1ubq",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "42.24 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=42.24 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "4.86 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=4.86 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "602"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=602, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "8.69 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=8.69 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "1.04 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=1.04 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "16.38 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=16.38 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "4.10 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=4.10 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "2.43 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=2, partitions=1, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=2.43 K, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "293"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=2, partitions=1, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=293, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "27.13 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=24, partitions=1, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=27.13 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "3.47 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=24, partitions=1, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=3.47 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "atom",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "residue",
+          "workers": 1,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workers": 2,
+      "native": [
+        {
+          "dataset": "cif_1ubq",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "660"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=660, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_1ubq",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "42.24 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=42.24 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "4.86 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=4.86 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "602"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=602, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "8.69 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=8.69 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "1.04 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=1.04 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "16.38 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=16.38 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "4.10 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=4.10 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "2.43 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=2.43 K, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "293"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=293, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "27.13 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=24, partitions=2, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=27.13 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "3.47 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=24, partitions=2, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=3.47 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        }
+      ],
+      "rust": [
+        {
+          "dataset": "cif_1ubq",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "660"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=660, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_1ubq",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "42.24 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=42.24 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "4.86 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=4.86 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "602"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=602, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "8.69 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=8.69 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "1.04 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=1.04 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "16.38 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=16.38 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "4.10 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=4.10 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "2.43 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=2.43 K, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "293"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=293, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "27.13 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=24, partitions=2, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=27.13 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "3.47 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=24, partitions=2, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=3.47 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "atom",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "residue",
+          "workers": 2,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workers": 4,
+      "native": [
+        {
+          "dataset": "cif_1ubq",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "660"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=660, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_1ubq",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "42.24 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=42.24 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "4.86 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=4.86 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "602"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=602, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "8.69 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=8.69 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "1.04 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=1.04 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "16.38 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=16.38 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "4.10 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=4.10 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "2.43 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=2.43 K, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "293"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=293, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "27.13 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=24, partitions=4, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=27.13 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "3.47 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=24, partitions=4, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=3.47 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        }
+      ],
+      "rust": [
+        {
+          "dataset": "cif_1ubq",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "660"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=660, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_1ubq",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "42.24 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=42.24 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "4.86 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=4.86 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "602"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=602, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "8.69 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=8.69 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "1.04 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=1.04 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "16.38 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=16.38 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "4.10 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=4.10 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "2.43 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=2.43 K, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "293"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=293, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "27.13 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=24, partitions=4, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=27.13 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "3.47 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=24, partitions=4, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=3.47 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "atom",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "residue",
+          "workers": 4,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workers": 8,
+      "native": [
+        {
+          "dataset": "cif_1ubq",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "660"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=660, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_1ubq",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "42.24 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=42.24 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "4.86 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=4.86 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "602"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=602, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "8.69 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=8.69 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "1.04 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=1.04 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "16.38 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=16.38 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "4.10 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=4.10 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "2.43 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=2.43 K, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "293"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=293, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "27.13 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=24, partitions=8, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=27.13 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "3.47 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=24, partitions=8, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=3.47 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        }
+      ],
+      "rust": [
+        {
+          "dataset": "cif_1ubq",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "660"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=660, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_1ubq",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "103.2 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=103.2 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "42.24 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=42.24 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "cif_64_blocks",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "64",
+            "encoded_bytes_read": "6.61 M",
+            "output_rows": "4.86 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=6.61 M, entries_decoded=64, output_rows=4.86 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "602"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=602, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_1ubq",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "1.36 K",
+            "output_rows": "76"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=1.36 K, entries_decoded=1, output_rows=76, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "8.69 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=8.69 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_mixed",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "15.75 K",
+            "output_rows": "1.04 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=15.75 K, entries_decoded=1, output_rows=1.04 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "16.38 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=16.38 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_long_segment",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "1",
+            "entries_decoded": "1",
+            "encoded_bytes_read": "41.15 K",
+            "output_rows": "4.10 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=1, partitions=1, metrics=[encoded_bytes_read=41.15 K, entries_decoded=1, output_rows=4.10 K, sources_opened=1]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "2.43 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=2.43 K, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_2",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "2",
+            "entries_decoded": "2",
+            "encoded_bytes_read": "4.56 K",
+            "output_rows": "293"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=2, partitions=2, metrics=[encoded_bytes_read=4.56 K, entries_decoded=2, output_rows=293, sources_opened=2]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "27.13 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=24, partitions=8, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=27.13 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_database_24",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "24",
+            "entries_decoded": "24",
+            "encoded_bytes_read": "52.40 K",
+            "output_rows": "3.47 K"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=24, partitions=8, metrics=[encoded_bytes_read=52.40 K, entries_decoded=24, output_rows=3.47 K, sources_opened=24]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "atom",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Atom, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        },
+        {
+          "dataset": "fcz_subset_empty",
+          "level": "residue",
+          "workers": 8,
+          "counters": {
+            "sources_opened": "0",
+            "entries_decoded": "0",
+            "encoded_bytes_read": "0",
+            "output_rows": "0"
+          },
+          "explain": [
+            {
+              "plan_type": "Plan with Metrics",
+              "plan": "CooperativeExec, metrics=[]\n  StructureExec: level=Residue, sources=0, partitions=1, metrics=[encoded_bytes_read=0, entries_decoded=0, output_rows=0, sources_opened=0]\n"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "installations": {
+    "native": {
+      "package": "/Users/mwiewior/research/git/polars-bio-native-structure-validation/.venv/lib/python3.12/site-packages/polars_bio/__init__.py",
+      "extension": "/Users/mwiewior/research/git/polars-bio-native-structure-validation/.venv/lib/python3.12/site-packages/polars_bio/polars_bio.abi3.so",
+      "extension_sha256": "b6d8c065aadffb25e962dd70fab877d8646c5610ff95bda6b88942b9c3e5d0b4",
+      "python": "3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:54:21) [Clang 16.0.6 ]",
+      "packages": {
+        "Pygments": "2.21.0",
+        "biopython": "1.88",
+        "coverage": "7.16.1",
+        "datafusion": "53.0.0",
+        "hypothesis": "6.155.7",
+        "iniconfig": "2.3.0",
+        "maturin": "1.13.3",
+        "numpy": "2.5.3",
+        "packaging": "26.3",
+        "pandas": "3.0.3",
+        "pluggy": "1.6.0",
+        "polars": "1.40.1",
+        "polars-bio": "0.35.1",
+        "polars-config-meta": "0.3.4",
+        "polars-runtime-32": "1.40.1",
+        "psutil": "7.2.2",
+        "pyarrow": "24.0.0",
+        "pyhmmer": "0.12.3",
+        "pytest": "9.0.3",
+        "pytest-cov": "7.1.0",
+        "python-dateutil": "2.9.0.post0",
+        "six": "1.17.0",
+        "sortedcontainers": "2.4.0",
+        "tqdm": "4.67.3",
+        "typing_extensions": "4.15.0"
+      }
+    },
+    "rust": {
+      "package": "/Users/mwiewior/research/git/polars-bio-rust-structure-validation/.venv/lib/python3.12/site-packages/polars_bio/__init__.py",
+      "extension": "/Users/mwiewior/research/git/polars-bio-rust-structure-validation/.venv/lib/python3.12/site-packages/polars_bio/polars_bio.abi3.so",
+      "extension_sha256": "88a89d55ceb14365c29612ef149e21a422130fa72048757e646e8cc884d1d578",
+      "python": "3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:54:21) [Clang 16.0.6 ]",
+      "packages": {
+        "Pygments": "2.21.0",
+        "biopython": "1.88",
+        "coverage": "7.16.1",
+        "datafusion": "53.0.0",
+        "hypothesis": "6.155.7",
+        "iniconfig": "2.3.0",
+        "maturin": "1.13.3",
+        "numpy": "2.5.3",
+        "packaging": "26.3",
+        "pandas": "3.0.3",
+        "pluggy": "1.6.0",
+        "polars": "1.40.1",
+        "polars-bio": "0.35.1",
+        "polars-config-meta": "0.3.4",
+        "polars-runtime-32": "1.40.1",
+        "psutil": "7.2.2",
+        "pyarrow": "24.0.0",
+        "pyhmmer": "0.12.3",
+        "pytest": "9.0.3",
+        "pytest-cov": "7.1.0",
+        "python-dateutil": "2.9.0.post0",
+        "six": "1.17.0",
+        "sortedcontainers": "2.4.0",
+        "tqdm": "4.67.3",
+        "typing_extensions": "4.15.0"
+      }
+    }
+  },
+  "expected_counts": {
+    "cif_1ubq": {
+      "sources_opened": 1,
+      "entries_decoded": 1,
+      "encoded_bytes_read": 103220
+    },
+    "cif_64_blocks": {
+      "sources_opened": 1,
+      "entries_decoded": 64,
+      "encoded_bytes_read": 6606325
+    },
+    "fcz_1ubq": {
+      "sources_opened": 1,
+      "entries_decoded": 1,
+      "encoded_bytes_read": 1364
+    },
+    "fcz_long_mixed": {
+      "sources_opened": 1,
+      "entries_decoded": 1,
+      "encoded_bytes_read": 15750
+    },
+    "fcz_long_segment": {
+      "sources_opened": 1,
+      "entries_decoded": 1,
+      "encoded_bytes_read": 41146
+    },
+    "fcz_subset_2": {
+      "sources_opened": 2,
+      "entries_decoded": 2,
+      "encoded_bytes_read": 4557
+    },
+    "fcz_database_24": {
+      "sources_opened": 24,
+      "entries_decoded": 24,
+      "encoded_bytes_read": 52403
+    },
+    "fcz_subset_empty": {
+      "sources_opened": 0,
+      "entries_decoded": 0,
+      "encoded_bytes_read": 0
+    }
+  },
+  "inputs": [
+    {
+      "dataset": "cif_1ubq",
+      "sha256": "056f98710cb2b36f633c45e41902a02eb446e82871da21ff2dd44f74a56ca0f6"
+    },
+    {
+      "dataset": "cif_64_blocks",
+      "sha256": "4e28dc87ed992023cd578a02c3481929a8363b1d8bb5ff8553ffa4a583d8277f"
+    },
+    {
+      "dataset": "fcz_1ubq",
+      "sha256": "fe35abab40ff9cb8d6120314585f188bf116ceeb801548328bbe1af4d8d9bff4"
+    },
+    {
+      "dataset": "fcz_long_mixed",
+      "sha256": "e7c7cfdfd260d9df548aa3dda3749d926c3efb9abbf1220ea55d5c8409947d74"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "sha256": "f3e6a7ae5e904b40a386f863a30966bd790423679067759cdef5caa278f45992"
+    },
+    {
+      "dataset": "fcz_subset_2",
+      "sha256": "fad008ca82e01b1fe9d5a5dbddc4080dfd12565d04ceee21fef7eb52543cd634"
+    },
+    {
+      "dataset": "fcz_database_24",
+      "sha256": "fad008ca82e01b1fe9d5a5dbddc4080dfd12565d04ceee21fef7eb52543cd634"
+    },
+    {
+      "dataset": "fcz_subset_empty",
+      "sha256": "fad008ca82e01b1fe9d5a5dbddc4080dfd12565d04ceee21fef7eb52543cd634"
+    }
+  ]
+}

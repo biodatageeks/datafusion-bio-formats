@@ -79,6 +79,14 @@ in [IMPLEMENTATION.md](IMPLEMENTATION.md) for evidence and scope.
 - [ ] R5.4 Update README/build instructions, native notices and package include rules to match the actual code/dependencies; retain attribution for translated portions.
 - [ ] R5.5 Record acceptance evidence and tested rollback pins; prepare the release handoff and archive/reconcile the relevant OpenSpec changes when appropriate.
 
+An isolated Rust-backed consumer wheel and a matching native wheel each pass
+231 installed tests on macOS ARM64, with four explicit external/network skips.
+The 64-case Python/storage benchmark has matching output, 45 cases within the
+local budget and 19 noisy cases; separate SQL counters preserve 0/2/24 selected
+decodes. A five-platform candidate wheel run is pending. These are trial results:
+the final formats pins, C++ build removal and final distribution checks remain
+open, so the R5 delivery checkboxes are not yet complete.
+
 ## Verification commands available today
 
 ```sh

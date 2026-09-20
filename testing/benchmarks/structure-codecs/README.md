@@ -108,8 +108,42 @@ The same 10% median time/RSS and 5% MAD/median noise thresholds apply. RSS inclu
 imports and warmups but is captured before untimed output hashing. The recorded
 first collection excludes imports and is neither first-batch latency nor a cold
 filesystem measurement. Filesystem caches are warm; no cache flush is attempted.
-Actual bytes read and decoder calls are not exposed by this Python API; input
+Actual bytes read and decoder calls are not collected by this harness; input
 sizes are provenance, not I/O counters. Provider tests separately enforce zero/K
 decodes. Large external databases, cold storage and other wheel platforms remain
 separate acceptance work. Use `--datasets`/`--workers` only for clearly labeled
 diagnostics and run benchmarks after local builds/fuzzing have stopped.
+
+The [macOS ARM64 installed-wheel run](results/2026-09-20-consumer-macos-arm64.json)
+completes all 64 cases with matching schemas and every-column hashes. Forty-five
+cases meet the local time/RSS budget; 19 exceed the noise threshold. One noisy
+full-database atom case at one worker has a 1.578 median time ratio (native time
+MAD/median 58%, Rust 13%). No stable case exceeds the budget, but these results
+do not establish complete performance acceptance. Keep that case and the noisy
+observations open; the earlier isolated Linux Arrow regression is also unresolved.
+
+A [longer database-only diagnostic](results/2026-09-20-consumer-database-diagnostic.json)
+uses nine pairs and a two-second native calibration at one worker. The slower
+atom observation does not repeat: atom/residue time ratios are 0.728/0.729 and
+RSS ratios 0.962/0.966, with both cases within budget. This targeted follow-up
+supplements the retained full run; it does not clear every noisy case.
+
+After timing, `consumer_counters.py` runs separate untimed `EXPLAIN ANALYZE`
+checks through the installed wheels:
+
+```sh
+python3 testing/benchmarks/structure-codecs/consumer_counters.py \
+  --native-python /path/to/native/.venv/bin/python \
+  --rust-python /path/to/rust/.venv/bin/python \
+  --output target/codec-consumer-counters.json
+```
+
+[All 64 atom/residue/worker cases](results/2026-09-20-consumer-counters-macos-arm64.json)
+have matching source/entry/row/payload counters. Database reads decode exactly
+0/2/24 selected entries. CIF's counter counts normalized blocks, so the expanded
+file reports 64 entries from one source. DataFusion formats large byte/row counts
+with rounded K/M suffixes; reports preserve those strings and compare payload
+totals within their displayed precision against exact fixture/index lengths.
+Payload bytes include FCZ database terminators and exclude sidecar reads. These
+are logical counters, not physical I/O measurements. Extension hashes tie the
+untimed counter checks to the measured wheel installations.

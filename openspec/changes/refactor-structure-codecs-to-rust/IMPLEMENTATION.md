@@ -329,12 +329,44 @@ records both results. The candidate still compiles native build inputs and has
 two unused inspection-helper warnings; this is runtime compatibility evidence,
 not the final package/artifact gate.
 
+An installed-extension audit using `nm -a` finds the nine codec bridge symbols
+in the native wheel and none in the Rust trial. Inspecting all symbols matters:
+both wheels hide these functions from their global exports. `otool -L` still
+reports libc++ for the trial, consistent with retained native build/link inputs.
+These observations do not claim C++-free builds or distributions.
+
 A manual five-platform workflow now builds that isolated candidate and runs the
-same installed-wheel tests on compatible native runners. Its results remain
+same installed-wheel tests on compatible native runners. The
+[five-platform consumer run](https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35522564474)
+was dispatched against `d58424b20ee147cddafb62e3deecf26f0bbe78c2`; its results remain
 pending. The new [paired consumer benchmark](../../../testing/benchmarks/structure-codecs/README.md)
 includes public Python collection, real local file/sidecar reads, full/subset/empty
 database selection and all output columns at 1/2/4/8 configured workers. It
 verifies matching Python/package versions and installed-extension/wheel hashes
 before measurement. Warm filesystem observations do not establish cold-storage
-or large external-database performance; actual I/O/decode counters are not
-exposed by the Python API.
+or large external-database performance. The
+[completed 64-case macOS ARM64 run](../../../testing/benchmarks/structure-codecs/results/2026-09-20-consumer-macos-arm64.json)
+has matching schemas, row counts and every-column hashes in every sample pair:
+45 cases meet the local time/RSS budget and 19 are noisy/inconclusive. One noisy
+full-database atom case at one worker has a 1.578 median time ratio, with native
+time MAD/median 58% and Rust 13%. No stable case exceeds the budget. All samples
+are retained; these results do not close R4.3 or erase the earlier Linux isolated
+Arrow finding.
+
+A [database-only diagnostic](../../../testing/benchmarks/structure-codecs/results/2026-09-20-consumer-database-diagnostic.json)
+then repeats the two one-worker cases with nine pairs and a two-second native
+calibration. Both pass the local budget: atom/residue time ratios 0.728/0.729,
+RSS ratios 0.962/0.966. The slower atom median from the noisy full run does not
+repeat. The original measurements remain retained, and other noisy cases remain
+inconclusive.
+
+Separate [installed-wheel SQL counter checks](../../../testing/benchmarks/structure-codecs/results/2026-09-20-consumer-counters-macos-arm64.json)
+pass all 64 dataset/level/worker cases. Source and decoded-entry counts match
+the fixture/index expectations, including exactly 0/2/24 database entries.
+Reported row/payload counts match across backends; large counts are rounded by
+DataFusion's display, so payload expectations are checked at that displayed
+precision. These logical byte counts include FCZ record terminators, exclude
+sidecars and do not measure physical storage I/O. The counter report verifies
+the same installed extension hashes as the timing run. All 15 candidate CIF/FCZ
+Rust source files are byte-identical between the main feature branch and the
+wheel trial; only the separate routing patch enables them for ordinary builds.
