@@ -13,6 +13,7 @@ installation are needed. Run from the repository root:
 
 ```sh
 python3 testing/oracles/structure-codecs/capture.py --check
+python3 testing/oracles/structure-codecs/cif_probes.py --check
 python3 testing/oracles/structure-codecs/reference.py cif testing/data/structure/1ubq.cif
 python3 testing/oracles/structure-codecs/reference.py fcz testing/data/structure/1ubq.fcz
 python3 testing/oracles/structure-codecs/reference.py tables
@@ -49,6 +50,10 @@ check does not replace the migration's numerical-tolerance/platform gates.
   reconstructed atom counts from the pinned upstream tables.
 - `manifest.json`: input/output/source hashes, original build provenance,
   per-case coverage, and measured independent checks.
+- `cif_probes.py` / `cif-probes.json`: 412 additional pinned lexical boundary
+  cases, including keyword-adjacent comments, context-sensitive save-frame
+  endings, quoted/unquoted control and UTF-8 bytes. Both the native and Rust
+  candidate parsers run these observations in offline tests.
 - `check_contract.py`: compares handwritten nulls, packed integers, residue
   identities, counts, numbering and analytical B factors. It also checks all
   602 1UBQ decoded atom identities/coordinates against the pre-existing,
@@ -82,7 +87,8 @@ The immutable reference archive retains its original source/license files:
   [the original oracle manifest](../structure/manifest.json) and
   [oracle README](../structure/README.md).
 
-No production Rust parser or decoder is introduced by this baseline commit.
+The repository-owned parser candidates are compiled only in unit tests during
+migration; they do not yet replace either production backend.
 The concrete interfaces, measured compatibility rules, layout and algorithm
 mapping are in [BASELINE.md](../../../openspec/changes/refactor-structure-codecs-to-rust/BASELINE.md).
 Long-chain/degenerate-geometry coverage, fuzz budgets, release performance,

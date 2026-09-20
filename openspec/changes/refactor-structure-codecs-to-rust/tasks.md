@@ -1,6 +1,6 @@
 # Implementation checklist
 
-The design defines stage gates and the immutable baseline. Completed local R0
+The design defines stage gates and the immutable baseline. Completed local
 work is checked below; [IMPLEMENTATION.md](IMPLEMENTATION.md) records measured
 evidence and [BASELINE.md](BASELINE.md) records the concrete contract/design.
 R0.7 and the production replacement stages remain open.
@@ -19,12 +19,16 @@ Gate: reproducible baseline, concrete internal module designs and explicit accep
 
 ## R1. Replace Gemmi's CIF parsing path
 
-- [ ] R1.1 Add repository-owned Rust tokenizer/document modules with raw string/null provenance, original block labels and bounded storage.
-- [ ] R1.2 Implement quoted/multiline values, loops/scalars, case-insensitive tags, multiple blocks, comments, syntax errors and measured baseline extensions.
+- [x] R1.1 Add repository-owned Rust tokenizer/document modules with raw string/null provenance, original block labels and bounded storage.
+- [x] R1.2 Implement quoted/multiline values, loops/scalars, case-insensitive tags, multiple blocks, comments, syntax errors and measured baseline extensions.
 - [ ] R1.3 Adapt `mmcif::Blocks` and category views while retaining the existing identifier, metadata, atom and residue mapping.
 - [ ] R1.4 Pass raw-parser differential tests, existing structure/policy tests, metadata-after-atoms cases and independent numerical/identity checks.
 - [ ] R1.5 Verify feature-off/shared-model builds, input limits, contextual errors and resource release; switch production mmCIF parsing only after its gate passes.
 - [ ] R1.6 Remove the Gemmi bridge/vendor build and unused direct build dependency; update source/provenance documentation without discarding applicable notices.
+
+R1.3/R1.4 have partial evidence: a test-only adapter uses the existing mmCIF
+mapping; all raw observations and complete atom/residue Arrow tables match.
+Production `Blocks`/provider routing and its full integration gate remain open.
 
 ## R2. Parse FCZ bytes safely
 

@@ -61,15 +61,41 @@ The commands are in [tasks.md](tasks.md) and the
 Full workspace/release/platform verification is still pending; the table is
 targeted evidence for this baseline-only change.
 
+## 2026-09-20: Rust CIF parser candidate
+
+Implemented `bio-format-structure/src/cif/{tokenizer,document,mod}.rs`, compiled
+only for unit tests while cutover gates remain open. The implementation owns
+one input byte buffer and checked cell spans with lexical flavor, preserves
+null/string provenance and original block labels, and validates UTF-8 on block
+exposure. It has no new dependency, FFI or unsafe code. Frames are parsed with
+nonrecursive state, and ignored frame values are not retained.
+
+The new parser matches the original 56 CIF observations plus 412 additional
+lexical probes captured by `cif_probes.py` from the pinned reference process.
+The added probes identified keyword-adjacent comments and context-dependent
+`save_#comment` endings, both now covered by offline regression tests. The
+shared contract tests execute once against each backend without duplicating
+test module definitions.
+
+A test-only adapter feeds Rust category views to the existing `mmcif::decode`
+mapping. Complete atom/residue Arrow batches, including null masks, identifiers
+and geometry, match exactly for 1UBQ and a synthetic fixture with metadata after
+atom rows, modified residues and nonstandard author IDs. Input ownership,
+cross-thread movement, deferred per-block UTF-8 errors, contextual syntax errors,
+truncations, delimiter mutations and 4,096 deterministic arbitrary-byte inputs
+are tested. These short mutation runs are not the planned sustained fuzz gate.
+
+R1.1/R1.2 are implemented. R1.3/R1.4 retain open provider-routing/integration
+work; R1.5/R1.6 retain the production switch/removal gates.
+
 ## Remaining work
 
 R0.7 is open: platform reference characterization, release benchmark cases and
 noise/repetition budgets, a cross-platform B-factor ceiling, and re-estimation.
-R1–R5 remain unstarted. Both production backends still use the existing C++
-implementations; the repository-owned Rust ports have not been implemented or
-switched on. No CI workflow, polars-bio pin, PR #461, published artifact or remote
-branch is changed by this checkpoint.
+Both production backends still use the existing C++ implementations. The CIF
+candidate is implemented and tested but not switched on. No CI workflow,
+polars-bio pin, PR #461, published artifact or remote branch is changed.
 
-Next implementation unit: the private CIF tokenizer/document parser, reusing
-the frozen raw-column tests, followed by the checked FCZ reader and reconstruction.
+Next implementation units: the checked FCZ reader and full reconstruction,
+followed by production integration after the acceptance gates pass.
 Do not equate local oracle success with full fuzz/performance/platform gates.

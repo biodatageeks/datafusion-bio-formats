@@ -1,5 +1,10 @@
 //! Protein atom/residue schemas, geometry, and lazy PDB/mmCIF table providers.
 pub mod batch_builder;
+// Candidate backend stays test-only until the migration acceptance gates pass.
+#[cfg(all(test, feature = "text-formats"))]
+mod cif;
+#[cfg(all(test, feature = "text-formats"))]
+mod cif_contract_tests;
 pub mod geometry;
 #[cfg(feature = "text-formats")]
 pub mod manifest;

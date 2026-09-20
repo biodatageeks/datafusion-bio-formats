@@ -105,7 +105,3 @@ impl Document {
         })
     }
 }
-
-#[cfg(test)]
-#[path = "cif_contract_tests.rs"]
-mod contract_tests;

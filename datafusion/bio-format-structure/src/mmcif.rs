@@ -255,3 +255,28 @@ fn decode(
     entry.normalize(options)?;
     Ok(Some(entry))
 }
+
+/// Exercise the candidate parser with the retained mapping without changing
+/// the provider's production backend during migration.
+#[cfg(test)]
+pub(crate) fn parse_rust_candidate(
+    data: &[u8],
+    options: &StructureOptions,
+) -> Result<Vec<NormalizedEntry>> {
+    let document = crate::cif::Document::parse(data)?;
+    let mut entries = Vec::new();
+    for index in 0..document.block_count() {
+        let view = document.block(index)?;
+        let block = CategoryBlock {
+            name: view.name,
+            columns: view.columns,
+        };
+        if let Some(entry) = decode(&block, index, options)? {
+            entries.push(entry);
+        }
+    }
+    if entries.is_empty() {
+        return Err(error("mmCIF contains no atom_site category"));
+    }
+    Ok(entries)
+}
