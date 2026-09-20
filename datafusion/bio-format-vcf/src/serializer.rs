@@ -1133,7 +1133,15 @@ fn build_format_and_samples(
             );
             (selected, carried_count)
         }
-        None => (format_fields.iter().map(String::as_str).collect(), 0),
+        // No carried order: the caller's list is header order, which need not
+        // start with GT. The specification requires GT first when present.
+        None => {
+            let mut selected: Vec<&str> = format_fields.iter().map(String::as_str).collect();
+            if let Some(pos) = selected.iter().position(|key| *key == "GT") {
+                selected[..=pos].rotate_right(1);
+            }
+            (selected, 0)
+        }
     };
     if selected.is_empty() {
         return Ok((String::new(), Vec::new()));
@@ -1863,6 +1871,50 @@ mod tests {
         // Should have FORMAT column and one sample column
         assert!(line.contains("GT:DP"));
         assert!(line.contains("0/1:25"));
+    }
+
+    #[test]
+    fn gt_is_written_first_whatever_order_the_caller_lists() {
+        // VCF 4.x: "the first sub-field must always be the genotype (GT) if it
+        // is present". Header order puts DP before GT, as the GIAB HG002 header
+        // does, and a caller with no carried key list passes header order.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new("DP", DataType::Int32, true),
+            Field::new("GT", DataType::Utf8, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![Some("rs123")])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(30.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(Int32Array::from(vec![Some(25)])),
+                Arc::new(StringArray::from(vec![Some("0/1")])),
+            ],
+        )
+        .unwrap();
+
+        let sample_names = vec!["SAMPLE1".to_string()];
+        let format_fields = vec!["DP".to_string(), "GT".to_string()];
+
+        let lines = batch_to_vcf_lines(&batch, &[], &format_fields, &sample_names, true).unwrap();
+
+        let line = &lines[0].line;
+        assert!(line.contains("\tGT:DP\t0/1:25"), "got: {line}");
     }
 
     #[test]
