@@ -8,9 +8,11 @@ use noodles_bgzf::r#async::io::Reader as AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 use opendal::services::{Azblob, Gcs, Http, S3};
 use opendal::{FuturesBytesStream, Operator};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::ops::Range;
+use std::sync::{Mutex, OnceLock};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
 use url::Url;
@@ -594,7 +596,10 @@ pub async fn get_remote_stream(
     let object = RemoteObject::open(file_path, object_storage_options).await?;
     match byte_limit {
         Some(limit) => object.stream_range(0..limit as u64).await,
-        None => object.stream().await,
+        // Chunked concurrent reads need the object size (a HEAD). A backend
+        // that refuses it, such as a pre-signed GET-only URL, drops to one
+        // sequential request instead of failing the scan.
+        None => object.stream_with_size_preflight_fallback().await,
     }
 }
 
@@ -663,6 +668,73 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
 }
 
+/// The region the environment configures, `AWS_REGION` first, then
+/// `AWS_DEFAULT_REGION`; an empty value counts as unset.
+fn configured_s3_region(region: Option<String>, default_region: Option<String>) -> Option<String> {
+    region
+        .filter(|r| !r.is_empty())
+        .or(default_region.filter(|r| !r.is_empty()))
+}
+
+/// Buckets whose region has already been detected in this process.
+static S3_REGION_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+/// Resolves the bucket's region without a network round trip when the
+/// environment names one, and detects it at most once per bucket otherwise.
+///
+/// The previous code nested `detect_region(..).await` inside `unwrap_or`,
+/// which Rust evaluates eagerly, so the detection request ran on every open
+/// even with `AWS_REGION` set. Every scan opens twice (compression sniff,
+/// then data), each on a fresh connection, so that was two extra round trips
+/// per file before the first byte of content arrived.
+async fn resolve_s3_region(bucket: &str) -> String {
+    if let Some(region) = configured_s3_region(
+        env::var("AWS_REGION").ok(),
+        env::var("AWS_DEFAULT_REGION").ok(),
+    ) {
+        return region;
+    }
+    let cache = S3_REGION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(region) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(bucket)
+    {
+        return region.clone();
+    }
+    // Only a successful detection is remembered: a transient failure must
+    // not pin the fallback region for the rest of the process.
+    let detected = S3::detect_region("https://s3.amazonaws.com", bucket).await;
+    if let Some(region) = &detected {
+        cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(bucket.to_string(), region.clone());
+    }
+    detected.unwrap_or_else(|| "us-east-1".to_string())
+}
+
+/// Reader settings for S3 as `(chunk size in bytes, concurrent fetches)`.
+///
+/// One fetch keeps a single streaming GET: opendal needs no chunk size for
+/// that, so it also issues no HEAD preflight, which pre-signed URLs and
+/// buckets without HEAD rights depend on. Sequential chunked reads were
+/// measured slower than one stream, so chunking is only worth enabling
+/// together with concurrency; that is what the AWS CLI does. A chunk size
+/// of zero falls back to the 8 MiB default rather than producing empty
+/// range requests.
+fn s3_reader_settings(chunk_size_mib: usize, concurrent_fetches: usize) -> (Option<usize>, usize) {
+    if concurrent_fetches <= 1 {
+        return (None, 1);
+    }
+    let chunk_mib = if chunk_size_mib == 0 {
+        8
+    } else {
+        chunk_size_mib
+    };
+    (Some(chunk_mib * 1024 * 1024), concurrent_fetches)
+}
+
 /// A remotely stored immutable object with bounded read primitives.
 #[derive(Clone, Debug)]
 pub struct RemoteObject {
@@ -696,21 +768,16 @@ impl RemoteObject {
                 log::info!(
                     "Using S3 storage type with parameters: \
                 bucket_name: {bucket_name}, \
+                chunk_size: {chunk_size}, \
+                concurrent_fetches: {concurrent_fetches}, \
                 allow_anonymous: {allow_anonymous}, \
                 enable_request_payer: {enable_request_payer}, \
                 max_retries: {max_retries}, \
                 timeout: {timeout}"
                 );
+                let region = resolve_s3_region(bucket_name.as_str()).await;
                 let mut builder = S3::default()
-                    .region(
-                        &env::var("AWS_REGION").unwrap_or(
-                            env::var("AWS_DEFAULT_REGION").unwrap_or(
-                                S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
-                                    .await
-                                    .unwrap_or("us-east-1".to_string()),
-                            ),
-                        ),
-                    )
+                    .region(&region)
                     .bucket(bucket_name.as_str())
                     .endpoint(&env::var("AWS_ENDPOINT_URL").unwrap_or_default());
                 if allow_anonymous {
@@ -727,7 +794,14 @@ impl RemoteObject {
                     .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
                     .layer(LoggingLayer::default())
                     .finish();
-                (operator, relative_file_path, None, 1)
+                let (reader_chunk, reader_concurrency) =
+                    s3_reader_settings(chunk_size, concurrent_fetches);
+                (
+                    operator,
+                    relative_file_path,
+                    reader_chunk,
+                    reader_concurrency,
+                )
             }
             //FIXME: Currently, Azure Blob Storage does not support anonymous access
             StorageType::AZBLOB => {
@@ -1144,5 +1218,59 @@ mod preflight_tests {
                 "{kind:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod s3_reader_settings_tests {
+    use super::s3_reader_settings;
+
+    #[test]
+    fn a_single_fetch_keeps_one_streaming_get() {
+        // No chunk size => opendal StreamingReader: one GET, no HEAD preflight.
+        assert_eq!(s3_reader_settings(8, 1), (None, 1));
+        assert_eq!(s3_reader_settings(8, 0), (None, 1));
+    }
+
+    #[test]
+    fn concurrent_fetches_enable_chunked_ranged_reads() {
+        assert_eq!(s3_reader_settings(8, 8), (Some(8 * 1024 * 1024), 8));
+        assert_eq!(s3_reader_settings(64, 2), (Some(64 * 1024 * 1024), 2));
+    }
+
+    #[test]
+    fn a_zero_chunk_size_falls_back_to_the_default_chunk() {
+        assert_eq!(s3_reader_settings(0, 4), (Some(8 * 1024 * 1024), 4));
+    }
+}
+
+#[cfg(test)]
+mod s3_region_tests {
+    use super::configured_s3_region;
+
+    #[test]
+    fn aws_region_wins_over_default_region() {
+        assert_eq!(
+            configured_s3_region(Some("eu-west-1".into()), Some("us-east-1".into())),
+            Some("eu-west-1".into())
+        );
+    }
+
+    #[test]
+    fn default_region_is_used_when_region_is_unset() {
+        assert_eq!(
+            configured_s3_region(None, Some("us-east-1".into())),
+            Some("us-east-1".into())
+        );
+    }
+
+    #[test]
+    fn empty_values_count_as_unset() {
+        assert_eq!(configured_s3_region(Some(String::new()), None), None);
+        assert_eq!(configured_s3_region(None, Some(String::new())), None);
+        assert_eq!(
+            configured_s3_region(Some(String::new()), Some("us-east-1".into())),
+            Some("us-east-1".into())
+        );
     }
 }
