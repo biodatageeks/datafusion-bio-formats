@@ -1,0 +1,37 @@
+name: Structure reader portability
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1 # toolchain from rust-toolchain.toml
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp
+      - run: cargo test -p datafusion-bio-format-structure --no-default-features --lib
+      - run: cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings
+  oracles-and-sanitizers:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r testing/oracles/structure/requirements.txt
+      - run: python testing/oracles/structure/generate.py --check
+      - run: bash testing/native/check-codec.sh

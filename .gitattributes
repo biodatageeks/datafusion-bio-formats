@@ -1,0 +1,5 @@
+# Preserve exact upstream bytes and fixture hashes across platforms.
+datafusion/bio-format-structure/native/vendor/** -text -whitespace linguist-vendored
+datafusion/bio-format-foldcomp/native/vendor/** -text -whitespace linguist-vendored
+testing/data/structure/** -text -whitespace linguist-generated
+testing/oracles/structure/*.json -text linguist-generated
