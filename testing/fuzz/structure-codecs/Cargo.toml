@@ -1,0 +1,56 @@
+[package]
+name = "structure-codecs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+libfuzzer-sys = { version = "=0.4.13", optional = true }
+serde_json = { version = "=1.0.149", optional = true }
+
+[features]
+default = ["fuzz"]
+fuzz = ["dep:libfuzzer-sys"]
+probe = ["dep:serde_json"]
+
+[[bin]]
+name = "cif_document"
+path = "fuzz_targets/cif_document.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "fcz_decode"
+path = "fuzz_targets/fcz_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "selected_range"
+path = "fuzz_targets/selected_range.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzz"]
+
+[[bin]]
+name = "codec_probe"
+path = "src/probe.rs"
+test = false
+doc = false
+bench = false
+required-features = ["probe"]

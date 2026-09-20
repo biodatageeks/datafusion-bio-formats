@@ -168,14 +168,82 @@ evidence. Final checks on this host:
 Full workspace, Rust release, supported-platform and consumer wheel checks
 remain outside this local candidate checkpoint.
 
+## 2026-09-20: Platform arithmetic, fuzz targets and release measurements
+
+Added a standalone validation workspace that includes the actual CIF, FCZ and
+normalization source files. Only its error carrier is substituted for DataFusion;
+the parser/decoder algorithms are not duplicated. It provides three ASan/libFuzzer
+targets and an optional separate-process probe. The selected-range target uses
+the production index parser, extracted without changing selection semantics.
+Malformed unselected payload ranges remain irrelevant.
+
+The probe checks all 355 original cases, 412 lexical cases and two long chains.
+The initial Intel and Linux runs exposed accumulated coordinate errors caused
+by compiler contraction and C++ math overloads. The corrected candidate uses
+the measured per-target arithmetic profile; no tolerance was increased and no
+original coordinate golden was rewritten. The 22 unfused parameter/B-factor
+overrides are separately captured from the pinned x86 reference. Even the
+original small coordinate goldens remain within 1e-4 on the measured Intel
+reference (maximum cross-target difference 5.7220458984375e-5 angstrom).
+
+[Platform observations](../../../testing/oracles/structure-codecs/platform-results/2026-09-20.json):
+
+| Executable target | Execution environment | Cases | Coordinate p50/p95/p99/max | B-factor max |
+| --- | --- | ---: | --- | --- |
+| macOS arm64 | Native, Apple Clang 16 | 769 | 0 / 0 / 0 / 0 | 0 |
+| macOS x86_64 | Rosetta, Apple Clang 16 | 769 | 0 / 0 / 0 / 0 | 0 |
+| Linux arm64 | Docker VM, GCC 14.2 | 769 | 0 / 0 / 0 / 0 | 0 |
+| Linux x86_64 | Docker emulation, GCC 14.2 | 769 | 0 / 0 / 0 / 0 | 0 |
+
+Each platform compares 159,915 coordinate components and all accepted identities,
+titles and B factors. Reports preserve executable/compiler/source hashes and
+record emulation explicitly. These are core parser/decoder/model observations;
+full DataFusion/platform wheel acceptance remains separate.
+
+Final-source [fuzz smoke metadata](../../../testing/fuzz/structure-codecs/results/2026-09-20-smoke.json)
+records nightly-2026-02-02, cargo-fuzz 0.13.2, RNG seed 20260920 and one 60-second
+ASan run per target: CIF 542,238 executions; FCZ 14,825; selected ranges
+22,891,334. All exited successfully without discovered failures. Input, atom,
+time and RSS bounds are in the [guide](../../../testing/fuzz/structure-codecs/README.md).
+Child CPU includes Cargo overhead; these smoke runs do **not** meet the required
+24 CPU hours per decoder target.
+
+The [release benchmark](../../../testing/benchmarks/structure-codecs/README.md)
+uses identical binaries, schemas, bytes and materialization for paired backends.
+It covers 93 cases: raw CIF, normalized decode, atom/residue Arrow conversion,
+decode-to-Arrow and full DataFusion queries at 1/2/4/8 workers. Nine fresh-process
+samples per backend alternate order, with two untimed warmups and equal iteration
+counts calibrated to 0.2 seconds. All paired row/decoder-call/byte counts match.
+[All samples and hashes](../../../testing/benchmarks/structure-codecs/results/2026-09-20-macos-arm64.json)
+are retained. Seventeen cases meet the local 10% time/RSS budget; 76 exceed the
+5% MAD/median noise limit and are inconclusive. One noisy CIF pipeline case has a
+1.138 median RSS ratio. No performance acceptance or general speedup is claimed.
+Inputs are preloaded; cold storage, actual sidecar-selection cost, Python
+collection and large external databases remain unmeasured by this harness.
+
+The portability workflow now compares the candidate against a pinned native
+process on five supported platforms, then runs debug/release/provider/feature
+checks. Three bounded fuzz jobs retain logs, artifacts and evolved corpora.
+The existing native sanitizer and independent Python oracle jobs remain while
+the production backends are native.
+
+Local checks after these changes: 66 combined tests pass (plus two ignored
+benchmark workers); structure feature-off passes six; Foldcomp alone and with
+text formats pass 32 each. Release libraries pass 40 tests plus the two ignored
+workers. Both production crates and the standalone harness pass Clippy with
+warnings denied; formatting, Ruff, unfused-parameter reproduction and strict
+OpenSpec validation pass.
+
 ## Remaining work
 
-R0.7 is open: platform reference characterization, release benchmark cases and
-noise/repetition budgets, a cross-platform B-factor ceiling, and re-estimation.
-Both production backends still use the existing C++ implementations. Both
-Rust candidates are implemented and exercised through test-only provider routing. No CI workflow,
-polars-bio pin, PR #461, published artifact or remote branch is changed.
+Both production backends still use C++. R0.7/R4 remain open for Windows and full
+hosted results, stable performance/RSS including storage/consumer cases, sustained
+fuzz campaigns and broader workspace/distribution checks. The new CI is ready
+to gather hosted evidence. No polars-bio pin, PR #461 or published package is
+changed by this checkpoint.
 
-Next stages are sustained robustness testing, release performance/RSS, supported
-platform verification, then production cutover/removal and consumer integration.
-Do not equate local oracle success with full fuzz/performance/platform gates.
+Re-estimate after the implemented candidates: allow roughly 3–6 engineering days
+for remaining validation, numerical/performance findings and cutover, then 2–4
+for consumer/wheel integration, plus review and campaign wall time. This estimate
+assumes no new format or numerical failure; the 24-CPU-hour decoder budgets still
+have to be measured, and noisy benchmarks cannot be counted as acceptance.

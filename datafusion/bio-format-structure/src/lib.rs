@@ -34,3 +34,6 @@ extern crate self as datafusion_bio_format_structure;
 #[cfg(all(test, feature = "text-formats"))]
 #[path = "../tests/structures.rs"]
 mod rust_provider_tests;
+
+#[cfg(all(test, feature = "text-formats"))]
+mod migration_benchmarks;

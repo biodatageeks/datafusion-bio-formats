@@ -1,0 +1,178 @@
+[
+  {
+    "label": "macos-arm64-native",
+    "host": "macOS-15.7.9-arm64-arm-64bit",
+    "reference": {
+      "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+      "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+      "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+      "compiler": "Apple clang version 16.0.0 (clang-1600.0.26.6)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+      "compiler_command": [
+        "c++"
+      ],
+      "flags": [
+        "-std=c++17",
+        "-O2",
+        "-D_USE_MATH_DEFINES",
+        "-include",
+        "exception"
+      ],
+      "platform": "macOS-15.7.9-arm64-arm-64bit",
+      "machine": "arm64"
+    },
+    "candidate_sha256": "6e4d291040464a777725f56acf35c4ddb73183c87d3425e4a38ad4361dcd9a6e",
+    "reference_binary_sha256": "7e9419784c71796378ce9a75466a3455c1519244e8ea21c9635863b5f418681c",
+    "coordinate_ceiling": 0.0001,
+    "bfactor_ceiling": 0.0,
+    "failures": [],
+    "summary": {
+      "cases": 769,
+      "components": 159915,
+      "max_coordinate_error": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max_bfactor_error": 0.0,
+      "failures": 0
+    },
+    "full_report_sha256": "4990b5301a70a0c39e97112f46a3ebc6f15197c5db416e609fe84a1a91c4c0d6",
+    "local_full_report": "target/codec-macos-arm64.json",
+    "case_records_sha256": "36ed3d551b69157e515ad0cddc7fb77b2cf4dd82f157c9ca3283e4ec4f6c4230",
+    "emulated": false
+  },
+  {
+    "label": "macos-x86_64-rosetta",
+    "host": "macOS-15.7.9-arm64-arm-64bit",
+    "reference": {
+      "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+      "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+      "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+      "compiler": "Apple clang version 16.0.0 (clang-1600.0.26.6)\nTarget: x86_64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+      "compiler_command": [
+        "clang++",
+        "-arch",
+        "x86_64"
+      ],
+      "flags": [
+        "-std=c++17",
+        "-O2",
+        "-D_USE_MATH_DEFINES",
+        "-include",
+        "exception"
+      ],
+      "platform": "macOS-15.7.9-arm64-arm-64bit",
+      "machine": "arm64"
+    },
+    "candidate_sha256": "a41aac17fb03ffa101633523b1e797cca3a2902bd5295b0a34997d4cc5b18924",
+    "reference_binary_sha256": "c7760f0b294a34472bc95c42a83e31f7013dae720cd45a1d1985f65a36897673",
+    "coordinate_ceiling": 0.0001,
+    "bfactor_ceiling": 0.0,
+    "failures": [],
+    "summary": {
+      "cases": 769,
+      "components": 159915,
+      "max_coordinate_error": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max_bfactor_error": 0.0,
+      "failures": 0
+    },
+    "full_report_sha256": "470239d3f6681cbeef6a14f42f6657ec0610fbec46e676ad2840442dac067667",
+    "local_full_report": "target/codec-macos-x86_64.json",
+    "case_records_sha256": "9c6355b85f1bb558af6eb18b17180c737ddcbe5bb655c719eebac0f9d14d5a1d",
+    "emulated": true
+  },
+  {
+    "label": "linux-arm64-container",
+    "host": "Linux-6.12.76-linuxkit-aarch64-with-glibc2.41",
+    "reference": {
+      "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+      "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+      "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+      "compiler": "c++ (Debian 14.2.0-19) 14.2.0\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+      "compiler_command": [
+        "c++"
+      ],
+      "flags": [
+        "-std=c++17",
+        "-O2",
+        "-D_USE_MATH_DEFINES",
+        "-include",
+        "exception"
+      ],
+      "platform": "Linux-6.12.76-linuxkit-aarch64-with-glibc2.41",
+      "machine": "aarch64"
+    },
+    "candidate_sha256": "95ad798f906d40b59bd06beeedd79f201de0f73126eb4c974b7d4b6a51bb4ba5",
+    "reference_binary_sha256": "bafd72f7ccda76faf363a8b3ac172d77fbdf39c7584bad4481e53d9f8f63290c",
+    "coordinate_ceiling": 0.0001,
+    "bfactor_ceiling": 0.0,
+    "failures": [],
+    "summary": {
+      "cases": 769,
+      "components": 159915,
+      "max_coordinate_error": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max_bfactor_error": 0.0,
+      "failures": 0
+    },
+    "full_report_sha256": "cb3df6a3cc35d3f5c6e05743c06a68b72849b10d7a6d452f50b81007f86d8f06",
+    "local_full_report": "target/codec-linux-arm64/comparison.json",
+    "case_records_sha256": "bb599bda5c2fcfa42a2c1348a36422851178841eb028fbcb6c6ab2a713a20328",
+    "container_image": {
+      "Id": "sha256:6cb94ce749a27bd81371937e8428d7c8219cda1636214133646d5d1fb5564098",
+      "Architecture": "arm64",
+      "Os": "linux"
+    },
+    "emulated": false
+  },
+  {
+    "label": "linux-amd64-container",
+    "host": "Linux-6.12.76-linuxkit-x86_64-with-glibc2.41",
+    "reference": {
+      "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+      "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+      "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+      "compiler": "c++ (Debian 14.2.0-19) 14.2.0\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+      "compiler_command": [
+        "c++"
+      ],
+      "flags": [
+        "-std=c++17",
+        "-O2",
+        "-D_USE_MATH_DEFINES",
+        "-include",
+        "exception"
+      ],
+      "platform": "Linux-6.12.76-linuxkit-x86_64-with-glibc2.41",
+      "machine": "x86_64"
+    },
+    "candidate_sha256": "741c546c186d5154b7630d429dbeda98e9923b10822cfec80c346312094acb4b",
+    "reference_binary_sha256": "1d704bcc693cc1db53a0e3a4be49f9b5dc4f45fcc8968d86293dfb4af2b50078",
+    "coordinate_ceiling": 0.0001,
+    "bfactor_ceiling": 0.0,
+    "failures": [],
+    "summary": {
+      "cases": 769,
+      "components": 159915,
+      "max_coordinate_error": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max_bfactor_error": 0.0,
+      "failures": 0
+    },
+    "full_report_sha256": "2509f78b7f798d546a48151434aa57dd44c0b04472ebbe77b5c5aecba29cc380",
+    "local_full_report": "target/codec-linux-amd64/comparison.json",
+    "case_records_sha256": "8ec620963ba46e60d18bf02ff800565a8ebefa58f5fda869b78389bb5b723bdb",
+    "container_image": {
+      "Id": "sha256:32083e263c2ecdea5981e577d5a12a4412518c7683a2d1084f9b5aa8fe20ad86",
+      "Architecture": "amd64",
+      "Os": "linux"
+    },
+    "emulated": true
+  }
+]

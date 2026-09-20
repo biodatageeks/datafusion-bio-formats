@@ -21,3 +21,6 @@ Cargo.lock
 .idea/
 
 !testing/data/structure/*.pdb
+
+# Reproducible standalone validation executables.
+!testing/fuzz/structure-codecs/Cargo.lock

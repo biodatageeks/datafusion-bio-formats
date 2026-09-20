@@ -40,10 +40,7 @@ fn check_contract(
         "../../../testing/oracles/structure-codecs/inputs.json"
     ))
     .unwrap();
-    let golden: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../testing/oracles/structure-codecs/golden.json"
-    ))
-    .unwrap();
+    let golden = crate::codec_goldens::load();
     let mut cases = inputs
         .iter()
         .filter(|case| case["mode"] == "fcz")

@@ -62,6 +62,13 @@ sustained fuzz, release-performance or wheel acceptance.
 - [ ] R4.5 Audit package/build artifacts for removed C++ sources, build invocations and bridge symbols; retain external reference execution separately from production.
 - [ ] R4.6 Update `.github/workflows/structures.yml` for Rust robustness checks and retained independent oracles; retire obsolete C++ sanitizer jobs only after replacement coverage exists.
 
+R4 now has source-identical ASan/libFuzzer targets, separate-process comparisons
+on four targets, a 93-case paired release benchmark and a five-platform CI matrix.
+These tasks stay open: smoke runs do not meet the 24-CPU-hour decoder budgets,
+most local benchmark cases are noisy, Windows/full hosted suites are pending,
+and native production paths have not been retired. See the latest checkpoint
+in [IMPLEMENTATION.md](IMPLEMENTATION.md) for evidence and scope.
+
 ## R5. Integrate polars-bio and prepare release
 
 - [ ] R5.1 Hand off the compatible formats revision and fixture manifest; update all polars-bio formats pins together on a dedicated follow-up branch.
@@ -81,9 +88,16 @@ cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcom
 python testing/oracles/structure/generate.py --check
 python3 testing/oracles/structure-codecs/foldcomp_tables.py --check
 python3 testing/oracles/structure-codecs/foldcomp_stress.py --check
+cargo build --locked --manifest-path testing/fuzz/structure-codecs/Cargo.toml --release --no-default-features --features probe --bin codec_probe
+python3 testing/oracles/structure-codecs/compare_candidate.py --candidate testing/fuzz/structure-codecs/target/release/codec_probe --output target/codec-platform-comparison.json --label actual-host-target
+python3 testing/fuzz/structure-codecs/seed.py
+python3 testing/fuzz/structure-codecs/run.py --toolchain nightly-2026-02-02 --seconds 60
+python3 testing/benchmarks/structure-codecs/run.py --output target/codec-benchmark-release.json --samples 9 --seconds 0.2
 openspec validate refactor-structure-codecs-to-rust --strict
 ```
 
-The oracle command requires the pinned development requirements. New comparison,
-fuzz and benchmark commands must be documented when implemented. Targeted tests
+The original oracle command requires the pinned development requirements. The
+[fuzz/probe guide](../../../testing/fuzz/structure-codecs/README.md) and
+[benchmark protocol](../../../testing/benchmarks/structure-codecs/README.md)
+record prerequisites and measurement limits. Targeted tests
 supplement the repository's required workspace CI and consumer wheel matrix.

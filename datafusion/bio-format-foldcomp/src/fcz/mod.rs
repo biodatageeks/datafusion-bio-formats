@@ -16,6 +16,7 @@ mod tables;
 pub(crate) use decode::decode;
 mod discretize;
 mod header;
+mod numeric;
 mod residue;
 
 #[cfg(test)]

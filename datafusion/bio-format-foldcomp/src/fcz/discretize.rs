@@ -1,4 +1,4 @@
-//! Float32 inverse discretization matching the pinned reference's contraction.
+//! Float32 inverse discretization matching the target reference contraction.
 //! Adapted from Foldcomp (MIT); see LICENSE-FOLDCOMP.
 
 #[derive(Clone, Copy, Debug)]
@@ -9,10 +9,8 @@ pub(super) struct Discretizer {
 
 impl Discretizer {
     pub fn restore(self, code: u16) -> f32 {
-        // The captured Clang/arm64 reference emits FMADD for code*factor+min.
-        // Explicit fusion reproduces those bits, independently of Rust's target
-        // instruction selection. This is compatibility, not a speed optimization.
-        f32::from(code).mul_add(self.factor, self.minimum)
+        // ARM64 uses FMADD; baseline x86-64 rounds multiply and add separately.
+        super::numeric::multiply_add(f32::from(code), self.factor, self.minimum)
     }
 
     pub fn sidechain() -> Self {

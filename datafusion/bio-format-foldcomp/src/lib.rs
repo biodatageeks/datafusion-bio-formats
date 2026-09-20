@@ -2,7 +2,10 @@
 //! Selectors are resolved from metadata before payload decoding; empty means zero rows.
 pub mod codec;
 #[cfg(test)]
+mod codec_goldens;
+#[cfg(test)]
 mod fcz;
+mod index;
 mod manifest;
 use async_trait::async_trait;
 use datafusion::{
@@ -71,3 +74,6 @@ extern crate self as datafusion_bio_format_foldcomp;
 #[cfg(test)]
 #[path = "../tests/foldcomp.rs"]
 mod rust_provider_tests;
+
+#[cfg(test)]
+mod migration_benchmarks;

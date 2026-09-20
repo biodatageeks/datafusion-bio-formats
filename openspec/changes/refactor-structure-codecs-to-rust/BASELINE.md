@@ -168,7 +168,7 @@ Keep header fields/indices private to prevent unchecked construction.
 | Rust module | Pinned upstream behavior to reproduce |
 | --- | --- |
 | `header.rs`, `bitstream.rs` | `codec_bridge.cpp::validate`, `Foldcomp::read/read_header`, `convertBytesToBackboneChain` |
-| `discretize.rs` | `Discretizer::continuize`, `decompressBackboneChain`, `FixedAngleDiscretizer(255)`; Float32 multiplication then addition |
+| `discretize.rs` | `Discretizer::continuize`, `decompressBackboneChain`, `FixedAngleDiscretizer(255)`; measured per-target Float32 contraction |
 | `backbone.rs` | `reconstructBackboneAtoms`, `Nerf::place_atom`, `reconstructBackboneReverse`, `reconstructWithReversed`, `weightedAverage` |
 | `residue_tables.rs`, `sidechain.rs` | `AminoAcid::AminoAcids`, residue/code/count maps, `Nerf::reconstructAminoAcid` |
 | `mod.rs` | `Foldcomp::decompress` orchestration, OXT/B factors/sequential numbering, existing `codec::decode` mapping and normalization |
@@ -194,15 +194,16 @@ changing language does not remove attribution obligations.
 ## Remaining gate
 
 The local reproducible harness, corpus and internal interfaces are in place.
-R0.7 remains open: characterize the reference on Linux x86_64/arm64, macOS
-x86_64/arm64 and Windows x64, freeze representative release benchmarks and
-noise/repetition budgets, and establish a cross-platform B-factor ceiling.
-Local synthetic B factors and independent 1UBQ coordinates match exactly.
-That observation is not cross-platform evidence. Exact B-factor comparison is
-retained in the new local Rust test until measured evidence justifies a change.
+R0.7 remains open for Windows characterization and stable release measurements.
+The four measured Linux/macOS targets now match their own reference with zero
+coordinate and B-factor drift over 769 cases. Intel runs on this ARM host use
+emulation, and the probes do not substitute for full provider/wheel tests.
+Exact B-factor comparison is retained per target; cross-target bitwise equality
+is not required. Benchmark inputs/repetitions/noise budgets are frozen in the
+[benchmark protocol](../../../testing/benchmarks/structure-codecs/README.md).
 
-Uncovered before production cutover: large/long-chain and near-degenerate
-geometry, threshold-sensitive peptide links, sustained fuzz budgets,
+Uncovered before production cutover: broader realistic long-chain and
+threshold-sensitive peptide-link cases, sustained fuzz budgets,
 performance/RSS, full workspace and distribution matrix. Retain the design's
 existing coordinate/angle tolerances and proposed performance/fuzz thresholds.
 Do not remove either native backend while these migration gates remain open.
@@ -225,3 +226,20 @@ conversion to degrees. Clang arm64 fuses the first dot-product pair as
 NeRF matrix accumulation also contract. The candidate encodes these decisions
 explicitly, matching all 24 database records and both long-chain probes with
 zero measured coordinate drift locally. This is not a cross-platform promise.
+
+### Measured platform arithmetic profiles (2026-09-20)
+
+Further characterization corrected the initial ARM-only assumption. Baseline
+x86-64 builds use separately rounded multiplication/addition; ARM64 Clang and
+GCC contract the expressions identified above. `numeric::multiply_add` makes
+that choice explicit. Apple headers select Float32 `sqrt`/`acos` overloads for
+the angle calculation. GNU headers select Float64: the Float32 squared-length
+product is promoted for sqrt/division, the cosine narrows to Float32, and acos
+and conversion to degrees use Float64. The norm's Float64 calculation is shared.
+
+The first cross-target checks exposed up to 19.82 angstrom drift on the artificial
+4,096-residue chain for x86 and 2.99 angstrom on Linux ARM. Preserving each
+measured arithmetic profile removes all measured drift without increasing the
+1e-4 coordinate ceiling. Separately rounded restored-parameter/B-factor bits are
+captured in `unfused-parameters.json` with pinned provenance. Original coordinate
+goldens remain unchanged. Windows remains an explicit validation gate.

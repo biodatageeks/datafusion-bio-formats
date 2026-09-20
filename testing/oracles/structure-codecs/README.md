@@ -67,6 +67,15 @@ check does not replace the migration's numerical-tolerance/platform gates.
   identities, counts, numbering and analytical B factors. It also checks all
   602 1UBQ decoded atom identities/coordinates against the pre-existing,
   independently generated Python Foldcomp oracle.
+- `compare_candidate.py`: compares all 769 original/lexical/stress cases with a
+  source-identical standalone Rust probe and a freshly selected pinned native
+  process. Reports identities, coordinate percentiles, exact B factors and
+  executable/input/output hashes; it never rewrites original goldens.
+- `unfused_parameters.py` / `unfused-parameters.json`: 22 separately rounded
+  restored-parameter/B-factor overrides captured on x86-64. Check with
+  `CXX='clang++ -arch x86_64' python3 testing/oracles/structure-codecs/unfused_parameters.py --check`
+  on Apple Silicon with the Intel toolchain/runtime installed. These expectations
+  do not replace original coordinate goldens or relax their tolerance.
 
 Float32 fields are stored as unsigned IEEE-754 bit patterns, preserving signed
 zero and exact values. Atom rows are
@@ -101,8 +110,10 @@ migration; they do not yet replace either production backend.
 The concrete interfaces, measured compatibility rules, layout and algorithm
 mapping are in [BASELINE.md](../../../openspec/changes/refactor-structure-codecs-to-rust/BASELINE.md).
 Long-chain and degenerate-frame regressions now supplement the small corpus.
-Sustained fuzz budgets, release performance/RSS, other platforms, consumer wheels
-and a cross-platform B-factor tolerance remain open. Shared provider suites also
+The [probe guide](../../fuzz/structure-codecs/README.md) documents the four-target
+comparison and CI setup; per-target coordinate and B-factor drift is zero locally.
+Sustained fuzz budgets, stable release performance/RSS, Windows/full hosted suites
+and consumer wheels remain open. Shared provider suites also
 run in unit-test builds with candidate routing; ordinary integration builds keep
 the native backends until the cutover gate. The captured error strings document the reference; future Rust
 errors must retain useful source/block context but need not copy Gemmi wording.
