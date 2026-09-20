@@ -34,6 +34,14 @@ Tests import the installed extension with isolated Python in a temporary directo
 outside either checkout. Windows omits pyhmmer and therefore skips the MSA module; missing external HMMER and opt-in network tests also remain
 explicit skips. These gaps do not count as passing oracle tests.
 
+Before this new workflow reaches the default branch, dispatch it through the
+existing portability workflow's optional entry point:
+
+```sh
+gh workflow run structures.yml --repo biodatageeks/datafusion-bio-formats \
+  --ref feat/rust-structure-codecs -f consumer_validation=true
+```
+
 This is runtime compatibility evidence, **not** final package acceptance. Native
 sources/build scripts remain in the trial, and two decoder inspection helpers
 still warn in ordinary builds. Final cutover must remove native artifacts, resolve

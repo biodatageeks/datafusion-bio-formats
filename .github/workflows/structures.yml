@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      consumer_validation:
+        description: "Run isolated Rust candidate installed-wheel checks"
+        type: boolean
+        default: false
       fuzz_cpu_seconds:
         description: "CPU seconds per decoder shard (0 runs normal portability checks)"
         type: number
@@ -17,8 +21,11 @@ on:
 permissions:
   contents: read
 jobs:
+  consumer:
+    if: github.event_name == 'workflow_dispatch' && inputs.consumer_validation
+    uses: ./.github/workflows/structure-codecs-consumer.yml
   native:
-    if: github.event_name != 'workflow_dispatch' || inputs.fuzz_cpu_seconds == 0
+    if: github.event_name != 'workflow_dispatch' || (inputs.fuzz_cpu_seconds == 0 && !inputs.consumer_validation)
     strategy:
       fail-fast: false
       matrix:
@@ -70,7 +77,7 @@ jobs:
       - run: cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --release --lib
       - run: cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings
   oracles-and-sanitizers:
-    if: github.event_name != 'workflow_dispatch' || inputs.fuzz_cpu_seconds == 0
+    if: github.event_name != 'workflow_dispatch' || (inputs.fuzz_cpu_seconds == 0 && !inputs.consumer_validation)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -82,7 +89,7 @@ jobs:
       - run: bash testing/native/check-codec.sh
 
   rust-fuzz-smoke:
-    if: github.event_name != 'workflow_dispatch' || inputs.fuzz_cpu_seconds == 0
+    if: github.event_name != 'workflow_dispatch' || (inputs.fuzz_cpu_seconds == 0 && !inputs.consumer_validation)
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:

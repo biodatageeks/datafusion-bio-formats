@@ -1,6 +1,7 @@
 name: Rust structure codecs installed wheels
 on:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:
