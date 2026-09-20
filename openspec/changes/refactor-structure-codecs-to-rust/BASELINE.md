@@ -194,7 +194,7 @@ changing language does not remove attribution obligations.
 ## Remaining gate
 
 The local reproducible harness, corpus and internal interfaces are in place.
-R0.7 remains open for Windows characterization and stable release measurements.
+R0.7 remains open for completing the release baseline measurements.
 The four measured Linux/macOS targets now match their own reference with zero
 coordinate and B-factor drift over 769 cases. Intel runs on this ARM host use
 emulation, and the probes do not substitute for full provider/wheel tests.
@@ -242,4 +242,22 @@ The first cross-target checks exposed up to 19.82 angstrom drift on the artifici
 measured arithmetic profile removes all measured drift without increasing the
 1e-4 coordinate ceiling. Separately rounded restored-parameter/B-factor bits are
 captured in `unfused-parameters.json` with pinned provenance. Original coordinate
-goldens remain unchanged. Windows remains an explicit validation gate.
+goldens remain unchanged. Hosted Windows x64/MSVC also passes all 769 cases:
+the maximum coordinate difference is 1.1444091796875e-5 angstrom and B factors
+match exactly, below the same 1e-4 / zero ceilings.
+
+### Native comparison build profile (2026-09-20)
+
+Hosted Linux ARM64 exposed a separate legacy build-mode difference: GCC at `-O0`
+does not contract the same expressions as the pinned `-O2` reference. The
+unoptimized C++ adapter differs in B-factor bits and reaches 0.01792 angstrom
+coordinate drift on the mixed long-chain fixture, while the Rust candidate
+matches the separate optimized reference exactly. The migration's numeric
+contract is explicitly the pinned optimized reference.
+
+The workspace therefore sets only Foldcomp's **test** package profile to
+optimization level 2, with debug assertions and overflow checks still enabled.
+This makes the retained native test adapter use the established reference
+profile on every host; production dev/release profiles and Rust arithmetic are
+unchanged. Remove this temporary test override when retiring the native adapter.
+The standalone fuzz/probe workspace and release benchmarks do not inherit it.
