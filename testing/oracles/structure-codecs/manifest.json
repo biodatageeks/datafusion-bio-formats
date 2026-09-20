@@ -1,0 +1,3237 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+    "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+    "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+    "compiler": "Apple clang version 16.0.0 (clang-1600.0.26.6)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+    "compiler_command": [
+      "c++"
+    ],
+    "flags": [
+      "-std=c++17",
+      "-O2",
+      "-D_USE_MATH_DEFINES",
+      "-include",
+      "exception"
+    ],
+    "platform": "macOS-15.7.9-arm64-arm-64bit",
+    "machine": "arm64"
+  },
+  "generator_sha256": "2b79f22a33bcc52a15b07f68d8a6eae9eb48108978a96edf5e58462c90c42480",
+  "capture_sha256": "b40937adb719bc80da4384a848c0a77f95fcc96ca7fbf106f256cc3f06dccf36",
+  "reference_sha256": "e1194b5d8d1c96bd030c96005ba299805d0febdb3358ddd39e4c6bce2e63780a",
+  "contract_checks_sha256": "5a978fe7603f44e6e9ad86c2f4769d4e4cf4e3f61f8cda61718f37fbdf772990",
+  "independent_checks": {
+    "1ubq_max_coordinate_error_angstrom": 0.0,
+    "synthetic_bfactor_max_error": 0.0
+  },
+  "fixture_sources": {
+    "1ubq.cif": "056f98710cb2b36f633c45e41902a02eb446e82871da21ff2dd44f74a56ca0f6",
+    "1ubq.fcz": "fe35abab40ff9cb8d6120314585f188bf116ceeb801548328bbe1af4d8d9bff4",
+    "example_db": "fad008ca82e01b1fe9d5a5dbddc4080dfd12565d04ceee21fef7eb52543cd634",
+    "example_db.index": "346d7d2cf546cbddca6e8c07320ce46b4fc0bd15035b017438d5110ec7827bf7"
+  },
+  "outputs": {
+    "golden.json": "9e57050f6134be09c19c66c2b36718c5710db3daebcd680beef959c851b358d9",
+    "inputs.json": "37e0f4c6c4f1e3733a9fbe6dc2ec2cfec1212839dff1ef3a8502f079f54d55c8",
+    "residue-codes.json": "88a99123344846d83ccc76483785341d764c4189cb1dd0883a4d49d692362082"
+  },
+  "cases": [
+    {
+      "name": "empty",
+      "mode": "cif",
+      "coverage": "empty",
+      "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "input_bytes": 0,
+      "max_atoms": 5000000,
+      "output_sha256": "8039c821724c670759c5b9c00d85e3bb0503ba785384df63beb55ff30df1fc00"
+    },
+    {
+      "name": "comments_only",
+      "mode": "cif",
+      "coverage": "comments only",
+      "input_sha256": "677efbcc75fb7c4f15795121763ef2d76fedabb5561eabc5fcd6b6d795743339",
+      "input_bytes": 19,
+      "max_atoms": 5000000,
+      "output_sha256": "8039c821724c670759c5b9c00d85e3bb0503ba785384df63beb55ff30df1fc00"
+    },
+    {
+      "name": "raw_nulls",
+      "mode": "cif",
+      "coverage": "raw nulls",
+      "input_sha256": "137d66f76d021048a9e810f24e315a19135516359ed6839c9153ccbc71473c34",
+      "input_bytes": 44,
+      "max_atoms": 5000000,
+      "output_sha256": "07fd98cfcc68640d9ac42830cfb0e81541a4ad4f99d66e21c4ab3f4fa9f4fa10"
+    },
+    {
+      "name": "embedded_quotes",
+      "mode": "cif",
+      "coverage": "embedded quotes",
+      "input_sha256": "1557062b74c22db2f3cce70f2360ffa51b7d969d21c85faabe66f85fa221d2ec",
+      "input_bytes": 33,
+      "max_atoms": 5000000,
+      "output_sha256": "4d0f3a81d9de0a29d22eae0098819bdb7fe45172539df4811f7f7f5b889cddca"
+    },
+    {
+      "name": "quote_before_comment",
+      "mode": "cif",
+      "coverage": "quote before comment",
+      "input_sha256": "2e804cda6a2b52dacf676314f68a7c5848cbd507f0704ab102a06ee20b98f8a3",
+      "input_bytes": 32,
+      "max_atoms": 5000000,
+      "output_sha256": "5a55066ae0ec9cf07e936852d08d6c61bcf2a2559f2acbc4808be5d536a1efd5"
+    },
+    {
+      "name": "bare_hash",
+      "mode": "cif",
+      "coverage": "bare hash",
+      "input_sha256": "e94a0f68c49fa93bf61a1028b8077bddf929549289d2e9a5d2ae13b32a0de9e0",
+      "input_bytes": 28,
+      "max_atoms": 5000000,
+      "output_sha256": "034a2cc6bd608479a274d29bca817a21a14aa4d144e96f809c856ae013a51474"
+    },
+    {
+      "name": "quoted_reserved_words",
+      "mode": "cif",
+      "coverage": "quoted reserved words",
+      "input_sha256": "60fc519d8a92e8b7a2baf3c6f87827ddf38446d455d970306fd30c591a86bca1",
+      "input_bytes": 64,
+      "max_atoms": 5000000,
+      "output_sha256": "34f1859076232cd433977f74e96674e4330a2d74f687fd09f2ad4bea6ddcdd54"
+    },
+    {
+      "name": "keyword_prefix_values",
+      "mode": "cif",
+      "coverage": "keyword prefix values",
+      "input_sha256": "fb931db5a56ac0f7cf400b7227bb6f9cb5e034061b3ef395c41bd5c12e50d160",
+      "input_bytes": 48,
+      "max_atoms": 5000000,
+      "output_sha256": "d627e631a8fd1c497125450f9221aed45ed6d9f9b5f725de2a0747dc0123a542"
+    },
+    {
+      "name": "text_field_lf",
+      "mode": "cif",
+      "coverage": "text field lf",
+      "input_sha256": "de272c533fafbf73beba5b2a63244ed7b08361927fea778c15e1ccb6cf2a00f6",
+      "input_bytes": 26,
+      "max_atoms": 5000000,
+      "output_sha256": "5b070a2bea313ab738808aea0287ac92eb071f5fdc3ffdcb6fcfbec1c25baa34"
+    },
+    {
+      "name": "text_field_crlf",
+      "mode": "cif",
+      "coverage": "text field crlf",
+      "input_sha256": "37e357b0ff31b3ac6e4854df17ee25da1f23376124997435b6c2e948ea1f3b6d",
+      "input_bytes": 31,
+      "max_atoms": 5000000,
+      "output_sha256": "62653893965a0f48519069641110c29314b06820d28ab96dcb2759475bd16b1e"
+    },
+    {
+      "name": "text_field_leading_newline",
+      "mode": "cif",
+      "coverage": "text field leading newline",
+      "input_sha256": "fb8104fb3250d250a7dc18ee73c8ac7c866876bb79b6edfc3157a641d16d69b5",
+      "input_bytes": 21,
+      "max_atoms": 5000000,
+      "output_sha256": "41337641e11a1fff06d8f1f44fc745e92a2d509bdbe569fb9aa9795a11b13d39"
+    },
+    {
+      "name": "text_field_empty",
+      "mode": "cif",
+      "coverage": "text field empty",
+      "input_sha256": "42aa811b239070ff32f51bb960de10b11329c73709e68a609a283d8e64e27325",
+      "input_bytes": 14,
+      "max_atoms": 5000000,
+      "output_sha256": "5eb480584f599319f9233b41c5c6095291d7afedd31d74fffeb08abef1ebda73"
+    },
+    {
+      "name": "semicolon_not_column_one",
+      "mode": "cif",
+      "coverage": "semicolon not column one",
+      "input_sha256": "8c9da0bc272dad147906a1a547ef2e7deca81b4663cc5e664ca70d7fe4018ad8",
+      "input_bytes": 19,
+      "max_atoms": 5000000,
+      "output_sha256": "b56c6e69166af8c6ac37d073c907b15e9a72f85037aa8c0e1120ab474d05a803"
+    },
+    {
+      "name": "semicolon_bad_close",
+      "mode": "cif",
+      "coverage": "semicolon bad close",
+      "input_sha256": "b2b7c7f63bac92042261b70da58cb895c7d0a31f266d7b25a5d8145ce647d545",
+      "input_bytes": 23,
+      "max_atoms": 5000000,
+      "output_sha256": "9c1bb11acd26d990c399ef797d5597ee44666344342d1809a3655c0ad527ee9a"
+    },
+    {
+      "name": "multiline_quote",
+      "mode": "cif",
+      "coverage": "multiline quote",
+      "input_sha256": "7aaac2720c28e81059a3dbbc231a375ab631253b4bced329f27fb06ba2e306e3",
+      "input_bytes": 25,
+      "max_atoms": 5000000,
+      "output_sha256": "67ac545192887edcea4b5654e4723dc6b69ab52bf5d2f345d01acdb1051f1f9b"
+    },
+    {
+      "name": "quote_carriage_return",
+      "mode": "cif",
+      "coverage": "quote carriage return",
+      "input_sha256": "ad7d88ad480bdc22abcde3301ee8a0fd8e7943673c51c97e1adf2adbf17ff5ba",
+      "input_bytes": 25,
+      "max_atoms": 5000000,
+      "output_sha256": "3078b6443ec24dab085cdf1c3656725242d4db510c0ca88ace536d8924748f0d"
+    },
+    {
+      "name": "unterminated_single_quote",
+      "mode": "cif",
+      "coverage": "unterminated single quote",
+      "input_sha256": "4eb71512f8b76f60668726670e22869f944ad1f408b74b876111635caf77c011",
+      "input_bytes": 18,
+      "max_atoms": 5000000,
+      "output_sha256": "e881e8486bb383e4701ecf80197865de01ea527df43b5bf4fe94447a64a44d0f"
+    },
+    {
+      "name": "unterminated_double_quote",
+      "mode": "cif",
+      "coverage": "unterminated double quote",
+      "input_sha256": "87c143f667e73b2fa0b9d3c99aba7cf3eb0aee8ed6dcd10b8f1acc682a782f23",
+      "input_bytes": 17,
+      "max_atoms": 5000000,
+      "output_sha256": "3c588b63b59d10e338b9992879709dd8a9872798c2ff18ec968501e95cc20935"
+    },
+    {
+      "name": "unterminated_text_field",
+      "mode": "cif",
+      "coverage": "unterminated text field",
+      "input_sha256": "493643e8c06e4187106cc8fdc75767c320c7475d856ad2a8da3454f2cdc1f573",
+      "input_bytes": 18,
+      "max_atoms": 5000000,
+      "output_sha256": "29d7135c47ffd34000a033aa96bcbfeb10509eb7f3e12c4d289e1158d3459239"
+    },
+    {
+      "name": "loop_physical_lines",
+      "mode": "cif",
+      "coverage": "loop physical lines",
+      "input_sha256": "1ed6108b06020e42a962f8d161704be0d57f161063b74019f49dcf932f58f5e8",
+      "input_bytes": 37,
+      "max_atoms": 5000000,
+      "output_sha256": "e6a138ecc10e834cecb19839b46a0c3851b779711a1b37a12c720bffe8dadd6e"
+    },
+    {
+      "name": "loop_stop",
+      "mode": "cif",
+      "coverage": "loop stop",
+      "input_sha256": "c599e598e757fb80cf53112daa3dc9d9eaa43362eb82a01253da018a356b9e99",
+      "input_bytes": 31,
+      "max_atoms": 5000000,
+      "output_sha256": "09a144a055da32fdf2bf974bc9a9194454e3fc922e2db594b334ebc12e40ca60"
+    },
+    {
+      "name": "empty_loop_at_eof",
+      "mode": "cif",
+      "coverage": "empty loop at eof",
+      "input_sha256": "83f2091b50ad0c5f29cbee1567d6a0f68fa43c6caf74d61886465390cd195dbb",
+      "input_bytes": 16,
+      "max_atoms": 5000000,
+      "output_sha256": "178271670c07e805626f605029a7ae16306d7eaeafe2e82e643b538f9ca53c5d"
+    },
+    {
+      "name": "empty_loop_before_block",
+      "mode": "cif",
+      "coverage": "empty loop before block",
+      "input_sha256": "04a6a3a2e8b4834df03e867bcbef30dde8593c48950a28ad8dcdffdb0241f01d",
+      "input_bytes": 28,
+      "max_atoms": 5000000,
+      "output_sha256": "bdc2c25ebbbe8961dacf056bee43a9ca129837f0f13e7cb4ea115cc1ded28178"
+    },
+    {
+      "name": "loop_no_tags",
+      "mode": "cif",
+      "coverage": "loop no tags",
+      "input_sha256": "5aa1529c53d427cb42c7a811e594e240f7ead0e220363c5eeaca7014cccce66b",
+      "input_bytes": 15,
+      "max_atoms": 5000000,
+      "output_sha256": "f5efd2533fd94c34bc7f25462b90df4d6db03e05b60e305287176ba84a58235a"
+    },
+    {
+      "name": "loop_incomplete_row",
+      "mode": "cif",
+      "coverage": "loop incomplete row",
+      "input_sha256": "23d853f0a111ca6497c80d1f65a23c53d2c24a4cac8eee01a7581f737d2bdc68",
+      "input_bytes": 25,
+      "max_atoms": 5000000,
+      "output_sha256": "d667f6aa0b16fd185e2bfdc9cbca3e8ac9acc4e904f6881643a3cc99cf1b5fbc"
+    },
+    {
+      "name": "loop_tag_no_whitespace",
+      "mode": "cif",
+      "coverage": "loop tag no whitespace",
+      "input_sha256": "dd1e51a5d32e8160b6d0ed9ed37c0055025c63acb85128d888945f7d7b9da6da",
+      "input_bytes": 15,
+      "max_atoms": 5000000,
+      "output_sha256": "72e8662f2122f2d17ea000092b9dcec8a51390aa02c58388a9a079312bd5c2aa"
+    },
+    {
+      "name": "missing_value",
+      "mode": "cif",
+      "coverage": "missing value",
+      "input_sha256": "13a748642cc7a4487c56dddb4c4a018bf0d0326c714e952183ead4be905a0167",
+      "input_bytes": 15,
+      "max_atoms": 5000000,
+      "output_sha256": "5a03cd66da554f83934a7313887b02e32605577276394690e7b2204e565d733e"
+    },
+    {
+      "name": "tag_no_name",
+      "mode": "cif",
+      "coverage": "tag no name",
+      "input_sha256": "d034314d0217ea48c8e7e2358079e4d689f4bff05bf4b57823558cd7210a3f44",
+      "input_bytes": 11,
+      "max_atoms": 5000000,
+      "output_sha256": "fa320b8018817d3c4675564efe5c39e1bbc0b2d56c4fb1d9a1f6527e7532ed4d"
+    },
+    {
+      "name": "duplicate_scalar",
+      "mode": "cif",
+      "coverage": "duplicate scalar",
+      "input_sha256": "0f6e1f1b0f2fee0b9893961a626d6f36686c74d4be669e7c17b4481731e87e08",
+      "input_bytes": 17,
+      "max_atoms": 5000000,
+      "output_sha256": "9dfe2ddae9b50abce5ceb60efe1e97a5f3b44b30ff65945ef046102effede3ec"
+    },
+    {
+      "name": "duplicate_loop_tag",
+      "mode": "cif",
+      "coverage": "duplicate loop tag",
+      "input_sha256": "1877c3b22cb22817f13f550b7f443148afd6dc4a810697c796abd75acec2fd83",
+      "input_bytes": 23,
+      "max_atoms": 5000000,
+      "output_sha256": "90ed308360b1bf6931397a467241106052c138217549279eac7f7170c2fc0ee9"
+    },
+    {
+      "name": "duplicate_scalar_loop",
+      "mode": "cif",
+      "coverage": "duplicate scalar loop",
+      "input_sha256": "5e936127108fcbac72d1da8b7ae374b43af0c2f28a90a961f6443cb75ad70089",
+      "input_bytes": 23,
+      "max_atoms": 5000000,
+      "output_sha256": "9dfe2ddae9b50abce5ceb60efe1e97a5f3b44b30ff65945ef046102effede3ec"
+    },
+    {
+      "name": "multiple_blocks",
+      "mode": "cif",
+      "coverage": "multiple blocks",
+      "input_sha256": "4b92bef39644cdbcadcb70e3d7a59e7796329ebb4cf37b7135ff4727282ede3a",
+      "input_bytes": 31,
+      "max_atoms": 5000000,
+      "output_sha256": "dc7bd8d7ed337ac8b423d7b247fb956e56b25bd18f77347ac289ed2260d24a77"
+    },
+    {
+      "name": "duplicate_block",
+      "mode": "cif",
+      "coverage": "duplicate block",
+      "input_sha256": "d4e7175198741edd749555a6658c6d10471f470cc8947d1d4d5bd321cb97e022",
+      "input_bytes": 30,
+      "max_atoms": 5000000,
+      "output_sha256": "dda26817a8931e98c80465371937acabac6f8662dee8b5c87eb6b8b3ea20da2a"
+    },
+    {
+      "name": "bare_data_heading",
+      "mode": "cif",
+      "coverage": "bare data heading",
+      "input_sha256": "513d40ffbac6120f2b5047379017e34b3eee376a063a921380572c936099adcb",
+      "input_bytes": 11,
+      "max_atoms": 5000000,
+      "output_sha256": "d5643c8409987137dff4867de750aca753bad3ecce8abcf5f7dd24bc80f415d2"
+    },
+    {
+      "name": "global_blocks",
+      "mode": "cif",
+      "coverage": "global blocks",
+      "input_sha256": "dff1c37ce0809d15363c6ddf10e2a95573c0b78626b87f1d193957bc9c4e27a2",
+      "input_bytes": 38,
+      "max_atoms": 5000000,
+      "output_sha256": "060b3e684699a663bafe13593280b799808c39adf0343245769cb53af974f3b2"
+    },
+    {
+      "name": "save_frame_ignored",
+      "mode": "cif",
+      "coverage": "save frame ignored",
+      "input_sha256": "a2cd87e5b4b4a7a43cc159cebac6113cadfd62852a8a5e664508f8dcaf400390",
+      "input_bytes": 53,
+      "max_atoms": 5000000,
+      "output_sha256": "b7f603db70cc93103b64a10e9072e9b61b125e281ffb9c15ee0b995427a7045b"
+    },
+    {
+      "name": "save_frame_duplicate_tags",
+      "mode": "cif",
+      "coverage": "save frame duplicate tags",
+      "input_sha256": "4466437390f7fcc6049cfc475b173432ab138b9f707d9d9f1b9a8224b3cd641c",
+      "input_bytes": 43,
+      "max_atoms": 5000000,
+      "output_sha256": "afc72ef577ff70bc1bdd94f054cdcb14c58e0bafff1c4309ebb5a3eedb770c5f"
+    },
+    {
+      "name": "save_frame_duplicate_names",
+      "mode": "cif",
+      "coverage": "save frame duplicate names",
+      "input_sha256": "598fc86137378b2d4c846b0fc9f2878fe688b465e3a3445908f88561189a249a",
+      "input_bytes": 51,
+      "max_atoms": 5000000,
+      "output_sha256": "36cb9e6d97436da10e9adee731a3e72ad738e40fa4e4c8e183dbc94cc168d9ea"
+    },
+    {
+      "name": "save_frame_missing_value",
+      "mode": "cif",
+      "coverage": "save frame missing value",
+      "input_sha256": "21c070df3eeacbb07790ac63a9ad08a0545367c9ef943c4d7bd0fee4c418daca",
+      "input_bytes": 27,
+      "max_atoms": 5000000,
+      "output_sha256": "5dd23ac76fac90738996108d04c8fbe4602f5f516d5d6ca97b31c468c7f65cab"
+    },
+    {
+      "name": "nested_save_frame",
+      "mode": "cif",
+      "coverage": "nested save frame",
+      "input_sha256": "079289552412058b9d72d319c0d2ca1ed47bba09770a7cc40cf1f35d0eedeb17",
+      "input_bytes": 46,
+      "max_atoms": 5000000,
+      "output_sha256": "da4277e2f9ebafa84cbb62de17bb4fa42f146538579f49c0bb54d0a184b8c525"
+    },
+    {
+      "name": "standalone_stop",
+      "mode": "cif",
+      "coverage": "standalone stop",
+      "input_sha256": "7c67a5b644e920e2e427d43e9fff7ac979a84063c4320de033d6f4573d3847a5",
+      "input_bytes": 13,
+      "max_atoms": 5000000,
+      "output_sha256": "fa320b8018817d3c4675564efe5c39e1bbc0b2d56c4fb1d9a1f6527e7532ed4d"
+    },
+    {
+      "name": "bare_dollar",
+      "mode": "cif",
+      "coverage": "bare dollar",
+      "input_sha256": "81ab5e077b113b5da088c69484d12bcd34c49a23a6a42984d4853cc8e51ef206",
+      "input_bytes": 15,
+      "max_atoms": 5000000,
+      "output_sha256": "eb1af7c02bf05adebc373447ba4b25fac323805f2882479b56cd426fccd0ea19"
+    },
+    {
+      "name": "no_header",
+      "mode": "cif",
+      "coverage": "no header",
+      "input_sha256": "85d2c2b3fc3caa07f54b464274c919f05ad203cdbdb2aa4e5c15fdc8bd6a2341",
+      "input_bytes": 9,
+      "max_atoms": 5000000,
+      "output_sha256": "f4dcc3e85cb1c4df66048e407c7433ef4b550a5a1fa3f94a9d9e840ecf364a27"
+    },
+    {
+      "name": "unicode_quoted",
+      "mode": "cif",
+      "coverage": "unicode quoted",
+      "input_sha256": "83468f8a9dfd4866a926a87735fa689e31d6f804ef15905813064135cd2f01e9",
+      "input_bytes": 18,
+      "max_atoms": 5000000,
+      "output_sha256": "2e87379b6d38160d7397314f1207c805aecd3e4d5d10e716338ff59ccc6bc321"
+    },
+    {
+      "name": "unicode_unquoted",
+      "mode": "cif",
+      "coverage": "unicode unquoted",
+      "input_sha256": "b2e4f4877552eae9bf61a0a9521391597affce454d8a16358571092c7f736638",
+      "input_bytes": 16,
+      "max_atoms": 5000000,
+      "output_sha256": "8eae6817da354b23a4926e72f8c8da7fca1d1cb066420e197fd75274e1a877f7"
+    },
+    {
+      "name": "unicode_comment",
+      "mode": "cif",
+      "coverage": "unicode comment",
+      "input_sha256": "d2de1bc4ca9ea8ea5405f61f8ce7a0b88e6862c34b2a7fc5a88dc595ae8ad868",
+      "input_bytes": 21,
+      "max_atoms": 5000000,
+      "output_sha256": "29cd2dabee916d886399c43a0342098f7ddb066f3a3cacf5e5f99ced92489c54"
+    },
+    {
+      "name": "numeric_uncertainty_raw",
+      "mode": "cif",
+      "coverage": "numeric uncertainty raw",
+      "input_sha256": "7e9dc0104d0c985cd7e4f1ce51fb467c524d94a3e05d1b7b0ad335566e293783",
+      "input_bytes": 32,
+      "max_atoms": 5000000,
+      "output_sha256": "d0647e2cdd06afc3b8d3210926f802806e4d2bf477efa90190cb6fbd23105737"
+    },
+    {
+      "name": "whitespace_formfeed",
+      "mode": "cif",
+      "coverage": "whitespace formfeed",
+      "input_sha256": "943411bd0ffc0287769fc6055923cefd6c74cc054b853eb0fc9238c3952cfc9a",
+      "input_bytes": 12,
+      "max_atoms": 5000000,
+      "output_sha256": "2881bc2ebe1744a03f9e7de2faaf8cb7a4baf694f4da693689f307fde8c4d464"
+    },
+    {
+      "name": "whitespace_vertical_tab",
+      "mode": "cif",
+      "coverage": "whitespace vertical tab",
+      "input_sha256": "5d93e594f2023ae0e2877f4977c79fa9f91db34a26a905a1b0ee105ae892eb6f",
+      "input_bytes": 12,
+      "max_atoms": 5000000,
+      "output_sha256": "2881bc2ebe1744a03f9e7de2faaf8cb7a4baf694f4da693689f307fde8c4d464"
+    },
+    {
+      "name": "metadata_after_atoms",
+      "mode": "cif",
+      "coverage": "metadata after atoms",
+      "input_sha256": "580d0a5dfe6b69d03a9487f1bee79bf586276f34a69ab3c57d4e0f066a7642ed",
+      "input_bytes": 439,
+      "max_atoms": 5000000,
+      "output_sha256": "dccc82423b90a2e890315030000e4fb0a0f0e27c606288525a36634e8cff9820"
+    },
+    {
+      "name": "invalid_utf8_quoted",
+      "mode": "cif",
+      "coverage": "invalid utf8 quoted",
+      "input_sha256": "1b797e4d5ea1a9101c2793bdc0094fcc140ea5a88fb88c04adfb4473719cd507",
+      "input_bytes": 14,
+      "max_atoms": 5000000,
+      "output_sha256": "785d95c56efbdaed49b81b2956a6a69660e714275e9f5d70d6c6707aeee992ff"
+    },
+    {
+      "name": "invalid_utf8_comment",
+      "mode": "cif",
+      "coverage": "invalid utf8 comment",
+      "input_sha256": "a8a4b41a8e93310426dae9bf5d2b7e33e0326ef43e61edbb402172f95326c81b",
+      "input_bytes": 17,
+      "max_atoms": 5000000,
+      "output_sha256": "29cd2dabee916d886399c43a0342098f7ddb066f3a3cacf5e5f99ced92489c54"
+    },
+    {
+      "name": "invalid_utf8_ignored_frame",
+      "mode": "cif",
+      "coverage": "invalid utf8 ignored frame",
+      "input_sha256": "057983a7ad34ff24db088677994502c19b0cc780bf4b4bc26583bd463b297731",
+      "input_bytes": 27,
+      "max_atoms": 5000000,
+      "output_sha256": "afc72ef577ff70bc1bdd94f054cdcb14c58e0bafff1c4309ebb5a3eedb770c5f"
+    },
+    {
+      "name": "nul_quoted",
+      "mode": "cif",
+      "coverage": "nul quoted",
+      "input_sha256": "d981b6274f9affa37b08b747be09fd1ebe6b0424922154c7b00ae5a8c4b039f4",
+      "input_bytes": 16,
+      "max_atoms": 5000000,
+      "output_sha256": "af5b57a44edb28c063e9670cad8f9be5f304b2d1e54c5bdab0d5f11632e7146a"
+    },
+    {
+      "name": "utf8_bom",
+      "mode": "cif",
+      "coverage": "utf8 bom",
+      "input_sha256": "8973d1ef9aabec732bfe536c3273b64a7f37d9e982c7a6d6312ab304805c4ad6",
+      "input_bytes": 15,
+      "max_atoms": 5000000,
+      "output_sha256": "f4dcc3e85cb1c4df66048e407c7433ef4b550a5a1fa3f94a9d9e840ecf364a27"
+    },
+    {
+      "name": "1ubq_raw",
+      "mode": "cif",
+      "coverage": "all real 1UBQ categories, values and rows",
+      "input_sha256": "056f98710cb2b36f633c45e41902a02eb446e82871da21ff2dd44f74a56ca0f6",
+      "input_bytes": 103220,
+      "max_atoms": 5000000,
+      "output_sha256": "068c1016749e4feac33df2d8af0fda1de8b29aa57cb672cb940f36703939de3c"
+    },
+    {
+      "name": "residue_code_00",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 0, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "f8416bc3c514edf254f97df7f4d6b17002351d8512b1f058262183018cd8dcf3",
+      "input_bytes": 208,
+      "max_atoms": 5000000,
+      "output_sha256": "bb90a2208daa8156fea6320d96f494997cf1673e61d7f30ebd7d94c45474271c"
+    },
+    {
+      "name": "residue_code_01",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 1, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "c342bebdf76bd09e9a69095729ce9056c2ab40f005909bd2ad508c3341d75f28",
+      "input_bytes": 220,
+      "max_atoms": 5000000,
+      "output_sha256": "fc782711dfe083601edcaec329186ee964802b2100cd9be0993a499290359987"
+    },
+    {
+      "name": "residue_code_02",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 2, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "c0381a87ce358a90619eb04d61e7107d4657e40a43f99e13302738e212a36b90",
+      "input_bytes": 214,
+      "max_atoms": 5000000,
+      "output_sha256": "9fba10e8c537f8e7f6896a30b45078fa3a895364d2bbbf47818cdb2840690d95"
+    },
+    {
+      "name": "residue_code_03",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 3, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "eb2c35935c41170839f178bdff9f90bea3e78007f850cfae49af779b3db6ea35",
+      "input_bytes": 214,
+      "max_atoms": 5000000,
+      "output_sha256": "2436b3938c4678af87de07ccbd258730e07bc8ec39160712ab0e428a73ec819d"
+    },
+    {
+      "name": "residue_code_04",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 4, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "9f0b4348a63d60b7b08b92f6f91499caaeaa554045cef0364e5c8f1703105892",
+      "input_bytes": 210,
+      "max_atoms": 5000000,
+      "output_sha256": "d65d564225489d82cf17c0aae7878f3c8cf38c16de7e451d7c427e762d203492"
+    },
+    {
+      "name": "residue_code_05",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 5, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "444b7d0b06d2830455b610896902d0a3f1f3798c25f33994ba892dd3076c3aa9",
+      "input_bytes": 216,
+      "max_atoms": 5000000,
+      "output_sha256": "d7b86b795ab5a44459a7467f39b8fae6e38ef2d5a44d19bdd4f6a25e1b097f0a"
+    },
+    {
+      "name": "residue_code_06",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 6, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "4ed1ccb74811e11b848460a8e249cd32c56db42fdc9b833e075f61313d4110ef",
+      "input_bytes": 216,
+      "max_atoms": 5000000,
+      "output_sha256": "e36b4a3455fe8eec231c9d449fa0c53eebcadbd4224149e5d57b7666d8cd1884"
+    },
+    {
+      "name": "residue_code_07",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 7, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "78083e701ead48d8d862ab9124b9bbfcd5a9f66aa87c15abf9c82dff861ab628",
+      "input_bytes": 206,
+      "max_atoms": 5000000,
+      "output_sha256": "d7d1bdcd801db550ebaf16b746e4dce8c239c2ec65f7defc42274546afb977e1"
+    },
+    {
+      "name": "residue_code_08",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 8, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "530c41908fb48cc4cfd8400fab5ee070477e4c3da85bbf7fd6a2abebcfbd15da",
+      "input_bytes": 218,
+      "max_atoms": 5000000,
+      "output_sha256": "4876a4caa3a00651cdaffbb40ef9871bb292cd5fc20ecaa42dbccd9d26d93489"
+    },
+    {
+      "name": "residue_code_09",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 9, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "0bc06ece545599ce63ec08e0cf573ec11623e106ad90fd5fed73e67969fffa62",
+      "input_bytes": 214,
+      "max_atoms": 5000000,
+      "output_sha256": "b2601ed0ff3a93e7a049c4b94c9e8e032cbfe4ccd02121823ae7f4b75bfa40a4"
+    },
+    {
+      "name": "residue_code_10",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 10, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "d293446dc07ae7b38deb87bed587f9ce519f4c8c5ca74c41ad469131a3de5cc9",
+      "input_bytes": 214,
+      "max_atoms": 5000000,
+      "output_sha256": "013f299d9b7eb557156c9a12abcbe2708163119d3135a36b83ddc0e9128e5d9e"
+    },
+    {
+      "name": "residue_code_11",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 11, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "875dc3cf30147cdf0adb7aa5d1fe976daf3dfed9eb6a94478543ac23230daa60",
+      "input_bytes": 216,
+      "max_atoms": 5000000,
+      "output_sha256": "24e2ade5f6cff4007efe4620a961d35e95f550bb0b9b80554b12b12bc8f185b7"
+    },
+    {
+      "name": "residue_code_12",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 12, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "07e2b4599da26079840c7ef36cde2c3591b29b47affdf911cb2ffab445778a9b",
+      "input_bytes": 214,
+      "max_atoms": 5000000,
+      "output_sha256": "3d00ee342dd3bb48b13668d04107917c5034de333d7c04ca5b49da38e6c1d548"
+    },
+    {
+      "name": "residue_code_13",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 13, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "309ffc66006d618017d09f56dc2a852b6ea4ba2c2bb098997ac70eb68524b905",
+      "input_bytes": 220,
+      "max_atoms": 5000000,
+      "output_sha256": "6a7fa6a3fda3118be93bea4df84b638bcda857413d0625568296cd02847b261f"
+    },
+    {
+      "name": "residue_code_14",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 14, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "6dd4561310fc7d41968ca2885295dad58b665b6b5d891d08d881a9c5840a8813",
+      "input_bytes": 212,
+      "max_atoms": 5000000,
+      "output_sha256": "724377036f993911da9a13ad94071a92b9a68fbbd7d8f30c8cb02feee79b5d49"
+    },
+    {
+      "name": "residue_code_15",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 15, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "24e56d856be3f2d317c6e2a741a23354f7c144db7093199942426316b8f9ac43",
+      "input_bytes": 210,
+      "max_atoms": 5000000,
+      "output_sha256": "4c181c47bbbff180c3ff878aedde0de89e8751b9e07a4c65638aae5f3f8a0dcc"
+    },
+    {
+      "name": "residue_code_16",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 16, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "862aa7ca2c79c28d7c9bef436d2710ec4ce90bfa8fa0e2dd62a7ffbe7a36ba3e",
+      "input_bytes": 212,
+      "max_atoms": 5000000,
+      "output_sha256": "f2a80415218f6123d45ded1e874845e48af70a698ec6921c6995a720231c7556"
+    },
+    {
+      "name": "residue_code_17",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 17, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "ff8e4725549f282d818d2b01ad53662119ea14ec2833d40c913b0122d536562c",
+      "input_bytes": 226,
+      "max_atoms": 5000000,
+      "output_sha256": "5981cf355e9e81f7de7466d8124b009ee802e0abe64182da3dbcba3e1be05e16"
+    },
+    {
+      "name": "residue_code_18",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 18, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "46e8016977ca1ae165befce5435c58f08b2b907c47637180075d98658342be8e",
+      "input_bytes": 222,
+      "max_atoms": 5000000,
+      "output_sha256": "654684b77956e14fd2eba1f56c955bdd1023fcc3300c848a2618ae32070f5b7e"
+    },
+    {
+      "name": "residue_code_19",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 19, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "f6fb2dd04a07a80c6d93ce34078d204e262f21eca1ae6dc8fa63fb486085d42e",
+      "input_bytes": 212,
+      "max_atoms": 5000000,
+      "output_sha256": "bca9494b557eee3e402a02038d082b1def32c9cc79e85965edc9bae8b6d5ce14"
+    },
+    {
+      "name": "residue_code_20",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 20, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "418547d3ed1e2e701a294748396244d064f6f917d06ceee0529aec9eff6fbf9a",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "47187d92029ffa134e714842e511c30b6eb4d3e9491f34aa192fde6962ec2cba"
+    },
+    {
+      "name": "residue_code_21",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 21, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "dfe6a80b0709aa11c3435a884076a5d331abfe8f417d45b1ba1d5be0b06f1d42",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "47187d92029ffa134e714842e511c30b6eb4d3e9491f34aa192fde6962ec2cba"
+    },
+    {
+      "name": "residue_code_22",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 22, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "4cd3b89f8f033d52b0ca03bde41dcc00875e8af5737d0844c14994ca4e582515",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "47187d92029ffa134e714842e511c30b6eb4d3e9491f34aa192fde6962ec2cba"
+    },
+    {
+      "name": "residue_code_23",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 23, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "84ced02782b845e655504ecc49446da0ffc084fb2b14295c66677982acd1bbbf",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "3e0e7b26ec34454508de56fee57d7cf57859ef153fae7278f38d21ccba1e7119"
+    },
+    {
+      "name": "residue_code_24",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 24, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "085978eb0980fd6d9007c7ce6cf3d40d19d27b1036ae97853f809cc481b19ef2",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "6463bbbcdc02daa1ff8028ff11c4de894817bd86c19e391c084bf2051b30575a"
+    },
+    {
+      "name": "residue_code_25",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 25, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "3957f4c975b60e168e017e468d1f0293df3705bca7d3c1755d9cd5e565b4635c",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "417d51b35a0c004794c898e4addec2ea6022e9c7e8c2385ba116caadcd9ae1d2"
+    },
+    {
+      "name": "residue_code_26",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 26, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "d834a014abc6fe99302265137f12f9197345844864927e397f0b4ddf36189885",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "ad8197faa066c54994f6753cbff39c681aa2c419ccc8696c60c437930b3e118c"
+    },
+    {
+      "name": "residue_code_27",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 27, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "27b30b50942c45cc7d7f47f87779988e20661fad3de09201884e5728da4d3a12",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "78db8957cc362d080065f5a7f97b31a92e75c8465e9fc2ea08410f29585ee137"
+    },
+    {
+      "name": "residue_code_28",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 28, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "107a487a8e9e47f0ccd4f0a07592ccedb814c9e8a48ef371fb37ffe8a2793b7c",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "d05bd11f6ef3d1a716080cf80b13721f7e67964f8b1ecf17215b82cb25c63aab"
+    },
+    {
+      "name": "residue_code_29",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 29, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "34c5e20e3226217c0ec86a59da62bf6aecfa5a70807e24332f2178d6aeb7bc31",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "02c5a2d2bd62c1c34c9d620d83acea80db3330e3d1f8670ecb864bcb0fb8cd64"
+    },
+    {
+      "name": "residue_code_30",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 30, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "ccb29cc3d81d3b9dbea3091c9f8b80a1670af4cfdba665321a724be12a756c14",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "db7bab2fe2255e48f44601562e6e0480e5d9d2ca97a668b0d9f48f1d8490d858"
+    },
+    {
+      "name": "residue_code_31",
+      "mode": "fcz",
+      "coverage": "5-bit residue code 31, sidechain count, full atoms, numbering, B factors",
+      "input_sha256": "80f5585118a1e841a362e632a70dfa8ec52937ea666281aff4a59fa2c3dd490e",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "e770e92e74732360779cf6f7a73dc07393676796fc1f212db2f41859f068d2fa"
+    },
+    {
+      "name": "oxt",
+      "mode": "fcz",
+      "coverage": "terminal OXT identity/numbering",
+      "input_sha256": "7b0c7c924c3f229a21eff910dcaf7a03300b293c719bf0f18b5b52fa590fdede",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "209f6e030168c279e73c79259f6ac3c37f34c46559dca9d35b60272b79239dce"
+    },
+    {
+      "name": "packed_bits",
+      "mode": "fcz",
+      "coverage": "nonzero packed angle bit fields",
+      "input_sha256": "dfe21e8bb05499379803cebc89d99ac230d77a7804531a7bd45a95a545cd5f66",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "a64bbb239a9078ef10201863ee9c731f3425e725b49add44ac6234b7d63e825c"
+    },
+    {
+      "name": "multi_anchor",
+      "mode": "fcz",
+      "coverage": "three anchors, two corrected segments",
+      "input_sha256": "3b3535a29dbd06f252cc31be208360d824ef7933869cc069502b5bd414a86aad",
+      "input_bytes": 293,
+      "max_atoms": 5000000,
+      "output_sha256": "c27ef4ae8961ec716eef4b8a4c2ffa22b5f32dbe16a99d2707ff32d0d606b640"
+    },
+    {
+      "name": "adjacent_anchors",
+      "mode": "fcz",
+      "coverage": "adjacent segments",
+      "input_sha256": "c6a4057e464c333b61c54dc33a392fbd2a1169c29b73388a49b06704c991d323",
+      "input_bytes": 267,
+      "max_atoms": 5000000,
+      "output_sha256": "84c36865c1b1437c634543fa902ad3df84d095383b14f6b16c947eb96f1c3054"
+    },
+    {
+      "name": "title_nul",
+      "mode": "fcz",
+      "coverage": "CStr title truncation",
+      "input_sha256": "fb46f3783652f8e6dab0faaa5bb313fe1b5d3f99dd006bd480c6bf9a41966671",
+      "input_bytes": 210,
+      "max_atoms": 5000000,
+      "output_sha256": "26bca65954de5f0ad457c2c1e1fbe05aaaa0ea3463cdbf6a05c3c1864da8935a"
+    },
+    {
+      "name": "title_utf8",
+      "mode": "fcz",
+      "coverage": "UTF-8 title",
+      "input_sha256": "18ce8ed57f99cd9ef44df707da3653e5891d6bdfab60a1dbf1320c9ffea56c3d",
+      "input_bytes": 203,
+      "max_atoms": 5000000,
+      "output_sha256": "1a1b156dadef292a164ce27198ffeaec14c7981a41105c849c88c77771232bdb"
+    },
+    {
+      "name": "title_invalid_utf8",
+      "mode": "fcz",
+      "coverage": "invalid title UTF-8",
+      "input_sha256": "7784625ee270236612d83b629b1fd8f28979df4fc04028f0446e67c8571c1be7",
+      "input_bytes": 199,
+      "max_atoms": 5000000,
+      "output_sha256": "785d95c56efbdaed49b81b2956a6a69660e714275e9f5d70d6c6707aeee992ff"
+    },
+    {
+      "name": "title_empty",
+      "mode": "fcz",
+      "coverage": "empty title",
+      "input_sha256": "ea5028e7e86a2b3187d7b2e258ca3957469695f861e6fe4904141a947f5cad44",
+      "input_bytes": 198,
+      "max_atoms": 5000000,
+      "output_sha256": "5834f5dd7ee68996ad9d5fe5e66d63e1c5e08231cfdf88b7051374d7b3ec1bdf"
+    },
+    {
+      "name": "1ubq",
+      "mode": "fcz",
+      "coverage": "real multi-anchor 1UBQ, full atoms and B factors",
+      "input_sha256": "fe35abab40ff9cb8d6120314585f188bf116ceeb801548328bbe1af4d8d9bff4",
+      "input_bytes": 1364,
+      "max_atoms": 5000000,
+      "output_sha256": "b509911d9fc6a8315203c183496aa129b2044ed3d54b9a34333cd1ffc383f05f"
+    },
+    {
+      "name": "bad_magic",
+      "mode": "fcz",
+      "coverage": "malformed bad magic",
+      "input_sha256": "ea0e1b4ba0b9634161d7ae3f3de01e4376aa07a2aceaee30b2e3a8046e075207",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "one_residue",
+      "mode": "fcz",
+      "coverage": "malformed one residue",
+      "input_sha256": "a8c5b889278c42da9116dcdf68ddfc0190a6a66af218ad8f8094b9aa50d273ad",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "f518924b408e1231ff95ceaea91834ad982fcd3dcd7b3538d92a154adf03b3d2"
+    },
+    {
+      "name": "too_few_declared_atoms",
+      "mode": "fcz",
+      "coverage": "malformed too few declared atoms",
+      "input_sha256": "8538ac0f872fd597fac64d5eec84d0a466f6fda6b4b69da89f8a0ed95fa4a928",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "f518924b408e1231ff95ceaea91834ad982fcd3dcd7b3538d92a154adf03b3d2"
+    },
+    {
+      "name": "anchor_count_one",
+      "mode": "fcz",
+      "coverage": "malformed anchor count one",
+      "input_sha256": "259f78ee1db541bee347cfdbb23ecf9384b7ce5b902ae82c5b401b4a9cef2601",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "9aba857c1c92d2f8099acc612ab56591e6e9210dad85f603dc2da7beb252be3b"
+    },
+    {
+      "name": "anchor_count_too_large",
+      "mode": "fcz",
+      "coverage": "malformed anchor count too large",
+      "input_sha256": "e0c3284011503f4ed0275845dc4da07d662e8952537fd6b09c7cbdab8692338e",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "9aba857c1c92d2f8099acc612ab56591e6e9210dad85f603dc2da7beb252be3b"
+    },
+    {
+      "name": "sidechain_count",
+      "mode": "fcz",
+      "coverage": "malformed sidechain count",
+      "input_sha256": "4f3b9aa01073c21958fc9b21a56d987c71ffdb735b31b2c853f652695f848c52",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "first_residue_mismatch",
+      "mode": "fcz",
+      "coverage": "malformed first residue mismatch",
+      "input_sha256": "1ce1e039b0cfd41e6fe9ae49d6e8706aa08fb73336179feca9a592f25ce5d953",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "bbddf89c8bcb707adc642ec126d0adac52bde8889a54d3c8195c381d3a8b5b33"
+    },
+    {
+      "name": "last_residue_mismatch",
+      "mode": "fcz",
+      "coverage": "malformed last residue mismatch",
+      "input_sha256": "99392cb6a23e3d9dc1ea791d8f6a871578c61f7692fb753699e48cdb81fe0ed7",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "d4817e642d19394f36b549a4faef0033ec98c3cce8e0a58c70e194cce7226027"
+    },
+    {
+      "name": "title_length_overflow",
+      "mode": "fcz",
+      "coverage": "malformed title length overflow",
+      "input_sha256": "aad9582859961017e5d980402e31ef55e939ba74e3ed77e5a4e5fe97915f21e2",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "nonfinite_min",
+      "mode": "fcz",
+      "coverage": "malformed nonfinite min",
+      "input_sha256": "b6a7742fb7945d55254b80f42534da7750ba47d6341b200ddc291ca2f8d9d64d",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "5a5c4fd1ce16c6acc3890cccb51ebb24b4ce16c34c4c21c28e3942eeeaeef72c"
+    },
+    {
+      "name": "nonfinite_factor",
+      "mode": "fcz",
+      "coverage": "malformed nonfinite factor",
+      "input_sha256": "42b69cfce24ee11daa7f24498ad8e5c92fc71dc03012b16a77a818eaf2950422",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "5a5c4fd1ce16c6acc3890cccb51ebb24b4ce16c34c4c21c28e3942eeeaeef72c"
+    },
+    {
+      "name": "first_anchor_nonzero",
+      "mode": "fcz",
+      "coverage": "malformed first anchor nonzero",
+      "input_sha256": "57f8115e78d2941bd73bd89d4bc2ee07b74c1f1cf239cd720bd215c78f42452b",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "e57459a21e259d59690faef16bbed868cf44fa346f65485724ab66ba754088b8"
+    },
+    {
+      "name": "first_anchor_negative",
+      "mode": "fcz",
+      "coverage": "malformed first anchor negative",
+      "input_sha256": "4db84efb430409b1017cc7f35da7c0eaeea8103ac5cdec89adcffed83ef03399",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "e63849dc6e2ee2c61f9dd04e8015f2c306680ea425a1f71af8001604a042747b"
+    },
+    {
+      "name": "anchors_duplicate",
+      "mode": "fcz",
+      "coverage": "malformed anchors duplicate",
+      "input_sha256": "d93bc5a8ef2dbc437f208040af9d19321c05799e9f943631efb3b0e659e9b665",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "e63849dc6e2ee2c61f9dd04e8015f2c306680ea425a1f71af8001604a042747b"
+    },
+    {
+      "name": "last_anchor_out_of_range",
+      "mode": "fcz",
+      "coverage": "malformed last anchor out of range",
+      "input_sha256": "13c3435bfd0e9e6395e943e76a6ba82f6dff417bb1ec57683535819ceeb7d4b9",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "e63849dc6e2ee2c61f9dd04e8015f2c306680ea425a1f71af8001604a042747b"
+    },
+    {
+      "name": "nonfinite_anchor",
+      "mode": "fcz",
+      "coverage": "malformed nonfinite anchor",
+      "input_sha256": "0f8083a5e03bf2a390fd0a5a8c6f5646d138f42886843264912401957a023afd",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "52b37335c4ba562d7216f23b9466f2c886fb38e45162d6b64f4f2127ad8f9862"
+    },
+    {
+      "name": "invalid_oxt_flag",
+      "mode": "fcz",
+      "coverage": "malformed invalid oxt flag",
+      "input_sha256": "16f1c6f7268268f4ad13e847d297e7c00f847b7a3c1c07760db71bb255ef69e9",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "af3f43dbe8b150ca52f38bd896009cd60b45a87df245aede5a31bb784029e25f"
+    },
+    {
+      "name": "nonfinite_oxt",
+      "mode": "fcz",
+      "coverage": "malformed nonfinite oxt",
+      "input_sha256": "f772e6611a93c10f7fc064e0716a72d7dff972723129c1b1a77715762eec03be",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "d8f20d7d15c903d1d115bcd0606632ce5709e8d78bb0aecfe883b4054b041d54"
+    },
+    {
+      "name": "nonfinite_bfactor_min",
+      "mode": "fcz",
+      "coverage": "malformed nonfinite bfactor min",
+      "input_sha256": "c90bcf13bcfa2a79e0ee005f26e1c43828cbf1555620182f0eb0289ca44c6b27",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "445354dbcda1d3fc0a8252ddcb4a8a8d7f635db4b7090c14bee0003d9f55861d"
+    },
+    {
+      "name": "nonfinite_bfactor_factor",
+      "mode": "fcz",
+      "coverage": "malformed nonfinite bfactor factor",
+      "input_sha256": "80b904e731475b09a11921d730d409fc37456957f8267099918a933596e97c0e",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "445354dbcda1d3fc0a8252ddcb4a8a8d7f635db4b7090c14bee0003d9f55861d"
+    },
+    {
+      "name": "truncated_000",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "input_bytes": 0,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_001",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "f67ab10ad4e4c53121b6a5fe4da9c10ddee905b978d3788d2723d7bfacbe28a9",
+      "input_bytes": 1,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_002",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b4777ccc172fb07e66e76582fcbae01af9154cbdc596c1f66aeae210c9f5b3a9",
+      "input_bytes": 2,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_003",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a5b2daad1323d3dd1dc6714d2768abb17bbdab346429339cbd632765310b6c02",
+      "input_bytes": 3,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_004",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e0c9789efd9a4dfaf800fd95c8339914e83b1c0000f5805f134b8d6934b2fa23",
+      "input_bytes": 4,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_005",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "2f3d4c04a363c1f20663a12042608ed4bce4b03f76ca2c8f3ee89b01a7da0696",
+      "input_bytes": 5,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_006",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "83cc04ab570e7d34afbf84db7cf0646f7ba59ef983bcaa3dd3e89619450079da",
+      "input_bytes": 6,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_007",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a7f3739b3c4546dfaaab9294b18b7956257a4d1a6b3ad1549b2a8463b5933c15",
+      "input_bytes": 7,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_008",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "35851fbbfde1804d502542d13953adb38bb701088925e11f5ca70f37fd7dacee",
+      "input_bytes": 8,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_009",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "90f52f59a77da50072e86cdb45658e013dec64bb419472bfe213119993d1d428",
+      "input_bytes": 9,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_010",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b1b6c72ba00e7d6df70060219025f98c194ef8e282f5f454151f86073634761f",
+      "input_bytes": 10,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_011",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b9cbb0e7c8fae7b853bff84292ed117d0c3a57d8c90df4ef1fd25fe496a9136e",
+      "input_bytes": 11,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_012",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "854a0f6a140f283ba1df7d4ad95b4508257099048b891ce1067fb6efe16733e6",
+      "input_bytes": 12,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_013",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "c43cc1eecac709bcdae1fc31c079605370d927c39d9dc74886c1a2814f086e40",
+      "input_bytes": 13,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_014",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "934dec3a72c2f7767cd508faac40b86f3bc4f16666753ccc435df430467db38a",
+      "input_bytes": 14,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_015",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4d255ee276fd9b14b2a6123cd95c1166793d9bafb186b2b1f69323f14e839620",
+      "input_bytes": 15,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_016",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a4664b9d57df0b9f68ba1ea2c0c437f3ad3223a008451e9597b337fe78acc7ca",
+      "input_bytes": 16,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_017",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4a9c45624ce24e1812e2b5668e45f3a191511037599865109019e957d846a4d3",
+      "input_bytes": 17,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_018",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "53bb1f41e4178b2ef14fa0a81b4aaedd28af9c0def8b4fe2f9a9f6fe48ac3de0",
+      "input_bytes": 18,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_019",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "df3128e2178c1b89b823645c0b830de53e3b436e5afa9e0bae9974a2c59df221",
+      "input_bytes": 19,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_020",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "577551e6130c514ff0f69e91469c2b4b69442c904b1fbff6c629b38ad43f403c",
+      "input_bytes": 20,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_021",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "10aaa969cc97a13e9e35bb1f55d5f0d02c41e7e45dc0dfc86a3f8378d54a6d61",
+      "input_bytes": 21,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_022",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "c32fadb0b1ffe08823b8e0ecee2ed8858fa14c1ae611cc4820901ba286bda38e",
+      "input_bytes": 22,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_023",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "f47371f1381e3a2a408978fcdb93c3e0e7026becfe37cd06271794cde14b6565",
+      "input_bytes": 23,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_024",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "047f3fdcce6a8d1df39a2033bebd7f89a13948ca5f389d4a537967514aea0952",
+      "input_bytes": 24,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_025",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a58fcae657ddcf3b8cc12932548d50164b529aea293ecfa6e342318858733704",
+      "input_bytes": 25,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_026",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "dfc8db9854b930cc0a702795d9ca437d0552066c01729d8b74216881b630dbc4",
+      "input_bytes": 26,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_027",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b569b85adc5903c26885174a4b51bbe1df843e75d989c70554fbd4e2f285df42",
+      "input_bytes": 27,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_028",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "09b20ca29a5fb7512130c60d5e39709ae351b97bbfdfde64fd8cfb1dfab4d8e2",
+      "input_bytes": 28,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_029",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "64338816305ed6100758c29d8df6f862c5d23e36f2716732ace97118fcc52ba2",
+      "input_bytes": 29,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_030",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9a790bd9a9d7e1724bc9e51c001d112add5104fc3bb693061d5395924f2e6a6a",
+      "input_bytes": 30,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_031",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "db8d8029a137fcda5e4afbe9c32cc8f5756bff94844140ec901d9a3be0dfbccc",
+      "input_bytes": 31,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_032",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a5541a5a93d1d77c5f70d9edf9b37890b16399adb31a7cc0f06af87944fd6567",
+      "input_bytes": 32,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_033",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "59f3f9d66a1cbe26bf9c301d8bdc4e5ba120ce5e3cad96ac39668e4f7d0c4f34",
+      "input_bytes": 33,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_034",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4fd2759acc6de246440b9bea40bcbfba3490a3df57fb799d71ea3699f8c9dbd9",
+      "input_bytes": 34,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_035",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b225b76005bbf7a55ff8f0a38cc523a8d8094d107bb8aa678eb762ea7398d768",
+      "input_bytes": 35,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_036",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "66e92fa7e2f7421d634730810b3421e5be2a69a9d6fe94c8a4e1383b996c05ba",
+      "input_bytes": 36,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_037",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "578d51cdb783b5dadf3b04158c8c9b7af3b70fd564a52599c361a90e215154f1",
+      "input_bytes": 37,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_038",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "80b433d8fcbecda5b38f4815886da04dda1308beef62359153cc5fa0cbc2e110",
+      "input_bytes": 38,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_039",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "6ab583473e48bf62b594620285e0cfeafdc8529b4afc94fae8d77f2cdb35d567",
+      "input_bytes": 39,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_040",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e267641c734ed573c311a795cb84d479aabc971dce915f4d16c700dccf9418ac",
+      "input_bytes": 40,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_041",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4d843184169500acc5bdb5a1ea92aff7650b73f7af1e6f66d9973f609f80064b",
+      "input_bytes": 41,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_042",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "c6943b1ad7c089ab7cdb7c33c8fda5673af9de7fff505f942aaf4f131e1ddeea",
+      "input_bytes": 42,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_043",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "1224930990f637e2c8bca781453e9a6a4ba6a6c0bb14f299e78f47f1be3aad0a",
+      "input_bytes": 43,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_044",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "704a739651461296800672a102c74b1b270daa26acf95a517733c5a7f6121390",
+      "input_bytes": 44,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_045",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "10c5e24fd925d95db0874c850fc6359d56d5651f17f36e6f1728f726521b16fc",
+      "input_bytes": 45,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_046",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "f374d7bc1887aa80c81d58f0c8ff23499d16c884d672b4b267a1744d174fe2e4",
+      "input_bytes": 46,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_047",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d666cb4f7b759a9c58123b8ca2505d7ab6f6b598c4156051b974fa0e267edb09",
+      "input_bytes": 47,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_048",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d7638873dff640420ea52f948fb2161d1feb6f8d7506a6769599c9cc03fc77d2",
+      "input_bytes": 48,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_049",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "32601062cd9851e03780d6851e60f245d1ee949d023976865f0867cef374956d",
+      "input_bytes": 49,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_050",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "1f559f5548ba23728f6ecce9b2fac7e69b2ea8bb2f8f5e44e8c69691998fde15",
+      "input_bytes": 50,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_051",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "67df78b0c49c18f5f40be91852cf66a7b105f5a2a21c5f8878410ca83fe219b1",
+      "input_bytes": 51,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_052",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "44ce4fff2fd324c05e9fb7309d5793bd0d35b97f82164f25158a8e041621626f",
+      "input_bytes": 52,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_053",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9d014a4f3a5988300fc76b8488d68ee0c2c686e62157652e863143a9a40dace2",
+      "input_bytes": 53,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_054",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "1dbca15f1c6cfa1ead29a7b7ae2c8fa310c70623db39ee7148f21e5840d59afb",
+      "input_bytes": 54,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_055",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "2dadea30ba175ea15e5d4a84547aabb6fea56274173dda41595b573d75ec54bb",
+      "input_bytes": 55,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_056",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "c0ceaa125a1726ff550c6e7519dc2a331c9f5d14f9beef060e2b0d77a1d62f21",
+      "input_bytes": 56,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_057",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a942093d1a37860d2c45d6dbcf96aebc6711441ccf76ef324e03139388cf850c",
+      "input_bytes": 57,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_058",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "2ce671425c863e656732b378535164db9d4e587add9c4544f4bd39f111fc3996",
+      "input_bytes": 58,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_059",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "51280e60b831847ac724edea102b503af33880166bc2f42c13fcafc4a3063fb2",
+      "input_bytes": 59,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_060",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "be87c56f2b0aa53644c43bb68af37d929181a2cab7f4ffdc2284c03fd09fab5e",
+      "input_bytes": 60,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_061",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "ce132e429ca5563d46aad7187aa589cb130685eb23e21142ff437ec137777c92",
+      "input_bytes": 61,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_062",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "5920d8b3fd6f9913077d5c8c2ba74e6bb7717911aec40a670474ec1121744c83",
+      "input_bytes": 62,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_063",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "fd14e89a1f05015a0e051d0b5d660c9b7212ce212ed4af92b895f4223d51d2c0",
+      "input_bytes": 63,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_064",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "3470287fa64797e3bc7d0ef284d9ad072ed553ff119e75c7ba3d77116893c9c4",
+      "input_bytes": 64,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_065",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8520b479d147fe397bffc1e765505963bb7924c6d4e8f48bbafdb4001426177a",
+      "input_bytes": 65,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_066",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "ef31349bfe5cfe7f532b774ec01c3a4df73fbb5be9dc0f372d58b3a7f3add2d8",
+      "input_bytes": 66,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_067",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "6f06988213ce2ec927bbd181010b942ea179e8688001d448fb94d7e2001f29f3",
+      "input_bytes": 67,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_068",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e37f53e62b7ca87189c866d0d5b44d080ce19e2ef2231f7efc72581216309661",
+      "input_bytes": 68,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_069",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "fc61608fbcc4bfd12f7a80af6a78b0f8184f7ba30aa2af02215fc48cec5dfcfd",
+      "input_bytes": 69,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_070",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8d3c2ccac8b0b0d69d544911175742d72e573c0ff59ee4cc18acd28bcfbccac5",
+      "input_bytes": 70,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_071",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8c1bfb25323fa1a38b9e6583a23425a4ca334d58876891c80fad2a18e5e87d86",
+      "input_bytes": 71,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_072",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b0e4e64487fa6799f4a23a9ff70bd79d9dc68539cb39a49fa3fd69132f83a5ff",
+      "input_bytes": 72,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_073",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "6c0ae4d9e695664caff9a0824cb5116c3843ffe6e3a25c857a571975c3570364",
+      "input_bytes": 73,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_074",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d66867a1d7b0791a2410e2710ec50ec46700f160ec497b5b72b87757ece7377b",
+      "input_bytes": 74,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_075",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9cccd3f33b0243d7fbe07be581e972545bd9437ed38811a92b288e5758a66d9e",
+      "input_bytes": 75,
+      "max_atoms": 5000000,
+      "output_sha256": "c17399c7fbfec8fe9cb71efa30978f0c0195c046fa7e017380aacce49fc5668e"
+    },
+    {
+      "name": "truncated_076",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "397ad8ac38bd5a7269495e28f1231c5cb99481a75cbe4eba0ac2d8dc874375c7",
+      "input_bytes": 76,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_077",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "343e30d9babd32f59e8adf0cb15ad32d83f2199d0751c5a828f3b2c9a2453f31",
+      "input_bytes": 77,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_078",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4eefec95f88946cdff65d46b6d5320ebbf9f1efff0b3c6ba43b99a4484e38d83",
+      "input_bytes": 78,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_079",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e08142fea09854500742df287720cad786e2aeb82dfebdca7d91012d408b6243",
+      "input_bytes": 79,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_080",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9426ac2de1b2ae32007f3bcb30869fb14bb3a1500136e827379d2dad54ecbd88",
+      "input_bytes": 80,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_081",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "267653a28d74540f26d626cbfd0c2ab9302d0aa9bd48fd26b468e67b9444b205",
+      "input_bytes": 81,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_082",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "523b3fb9505ed6716ca8fc31d08543568bd132ceca694dd52e4ce7feac56941a",
+      "input_bytes": 82,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_083",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "77e861c122e30d7a342a26588e46fefa6c66aca277fbabe2dec54a7228ad6001",
+      "input_bytes": 83,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_084",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "1a6f29874f66ad6cb93f03507c502838697f2801777467ff5ba2bf8094387427",
+      "input_bytes": 84,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_085",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9bc3c87a2f834c9f8eae3ef79323a318aeffc9c5252b19a589bb107b9ce5486b",
+      "input_bytes": 85,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_086",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9173e1b4ccee73886c5d7e135c45ff48635ca8ac8b5e96012672ec3fa805c675",
+      "input_bytes": 86,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_087",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e3f634fd2e18829d9eef95c18b0378219dcb3a1190fd2182e839e78b6e053d1d",
+      "input_bytes": 87,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_088",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "843d8d34f03a72126ba46846adc34c8348359ee64cec5d400f363029dcfe77e7",
+      "input_bytes": 88,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_089",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "797e505e54464f639bb8c20f014e6246ee19fd9312b1213b64db2dacd105c221",
+      "input_bytes": 89,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_090",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "af9111345fe597079b36b3a68195082dd13c236648e92e53e75cab202cdb5996",
+      "input_bytes": 90,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_091",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "7eec9e5aa3ee6222e4547e49e110be5ac33c45bdaa95385b59d5e3988b61a4b9",
+      "input_bytes": 91,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_092",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "038bd880fcd9f3988a96e43758918d00cf9b1478e2517a4193e43cfd7155453c",
+      "input_bytes": 92,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_093",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d99ec23c94c77819033ffe5060036e97baf86000226380198e64edc7da929da8",
+      "input_bytes": 93,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_094",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "dacbcfe765e56f65fde5922403c225c0c92cec7fbb5553a6aa36adbecfe8def8",
+      "input_bytes": 94,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_095",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "efa5dd73c2f965f59dd17bd1a89b1a92429750ed3a3f7012c9c0e6d5964dbe6b",
+      "input_bytes": 95,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_096",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e2211e8d52c1f8b2824107d4396d81988a8badf5cea2ea4edcfeab0a2c81dfae",
+      "input_bytes": 96,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_097",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "01c2dea3cf5dedddd9e62352a92e321841be5837a7e21b4c1f541307f710b305",
+      "input_bytes": 97,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_098",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "76a433a94b6fa42351be4932d315c6d52a3c8f6f28b89e9aff4ff0551f545ae0",
+      "input_bytes": 98,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_099",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8b6f2ce914d83083fe5be5fefdf3db0d6d0613cad5d3b12b5cd67da927e216f3",
+      "input_bytes": 99,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_100",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "5fc83250cb0e997bd02783b1d7d6076395f9213ba0bd5fb550b4975a9d1f4d42",
+      "input_bytes": 100,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_101",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "37e025a3091c4a4d3c5bf6f01eeac397b708a8538f9addc105a1ecdf985aa959",
+      "input_bytes": 101,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_102",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "ca57e45be6aca3076589e9119b861c2721535e407143d9730db83d7829d9e7a8",
+      "input_bytes": 102,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_103",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "45fb3e0e68da8a2ec078f629be60057dc6bcd86b3db1986a30eed0fa9dcd5fbb",
+      "input_bytes": 103,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_104",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4e0059af162421b25c2affa00eeb6ff0a8baa4925a6fdff133e9503471d3d506",
+      "input_bytes": 104,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_105",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "5ab61e374becd9e5f5f337368e18c9549e02bc2a168f4ef1a25296c830bd3328",
+      "input_bytes": 105,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_106",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "aa6d82d621423f03a724bfe0ad465e9e860492d7bf9998ad01f29c110b0f6cbe",
+      "input_bytes": 106,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_107",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "f3558ef88cbc35973a054718a7e18c49da10203ffe99a3094614d9df282fe38b",
+      "input_bytes": 107,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_108",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "28fd298228dae56ca6cf0067d647cbccf9f82cf752d3525f93abb6c0d522e836",
+      "input_bytes": 108,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_109",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "2e032b835102acfb4c02328cf37409c962df379b639a82c0ebbe163f9a36e65e",
+      "input_bytes": 109,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_110",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "51ec1fe337134750d4a72191dfb53bc37d473b03dd6e03a2b7bad9f9456d3318",
+      "input_bytes": 110,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_111",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4eab9e7d8c5e9d87efff12138d91739f07edb3b04236b49da94a32eb17868f61",
+      "input_bytes": 111,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_112",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e53bcc80402dea4c814d0cf70d403a8ecdcff42cdf8d718cdb2ed3d106c649c7",
+      "input_bytes": 112,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_113",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "509e4593bba589f7cce44d51aa4c332cfb902df5fb6924fc95e64f73a663c78c",
+      "input_bytes": 113,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_114",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "527a912613a10f8e1153d397ad796532ae61c6fcdc7b5b9e60f084fad4fb31ee",
+      "input_bytes": 114,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_115",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e66549524622476278ba334f835892230eda21ef365ac33d4e9ad97349f0afdf",
+      "input_bytes": 115,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_116",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "79911799be9bf3d23b7185144843782ddbbdc755dddfbfb0668510bc96157d98",
+      "input_bytes": 116,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_117",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "5a057f5066b5d5ebd55a638687ccb17684ece9a808b8ffe3bf58b8198247042c",
+      "input_bytes": 117,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_118",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "1d0da6f3f6469417002ed2c00108e641d0bf3e71a45a8be800528bf036272c69",
+      "input_bytes": 118,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_119",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d2d9f76632f80db0fc7a78f1fa4e9f350a531373788716116e5e183fc3399eb9",
+      "input_bytes": 119,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_120",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "87e5510e13bc78504a2bacf7ddf22b4223d036c47b4696b4adbcf1c79ff77dac",
+      "input_bytes": 120,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_121",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b08ce2181fe4694f7fea0a1308a155e6f63bab1bb7fb9f94feb8e6d115f71630",
+      "input_bytes": 121,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_122",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "6c28cea2dcbb6b9b327c558c1a27ea1d1a9fc6067abcabc914c4c1f214d2b761",
+      "input_bytes": 122,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_123",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "0c57f7f3da6eeeebf135810d2ebfc47c6abb326f1473f7da83f21f67852aac15",
+      "input_bytes": 123,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_124",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "6c3b9abd66586c70ec7bc6843d5eecfc1baa581fdc24d0304241a5ecd39ab016",
+      "input_bytes": 124,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_125",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d90ba821aca8cb143edf879e9fedee52dbe491d3f8012bfd135a3072daadd25a",
+      "input_bytes": 125,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_126",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "88540bbe95de47b7ce37c83fbc6359eda864aaa6453e5db0f9caa1ba6b9caec0",
+      "input_bytes": 126,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_127",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "c1db349ad3722547a2a70c882b8bee1c3de4913e5b1611b8dc9001a7b91159f4",
+      "input_bytes": 127,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_128",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "7a017f1306ffef0c3cf8e7ce34a6457dc00723127a3a0e66777deafee2b86f73",
+      "input_bytes": 128,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_129",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "87bde6d0dd397be4bde1b27ef3cb3a6fa188386dbb388ab146665729ea8e67bd",
+      "input_bytes": 129,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_130",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8a897c44a2f76ea564a3ea8c96315623b88ed6a623b0eea166ceb75bbdf6e6be",
+      "input_bytes": 130,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_131",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e5a7377305574ea6c1b9a42564639469e11d45cf365d62b62ea4de27a4c1553e",
+      "input_bytes": 131,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_132",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a585f80ea3a1e269855297b5481d061f264cea0c43dfe0ae659bec70eec09768",
+      "input_bytes": 132,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_133",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "cdd225c9cd7bf55f9b009f56fdc02733309b27185daaca6ca4241e70655bf39e",
+      "input_bytes": 133,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_134",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9835b3cefaec53e8ce9dd254fe5cbe43ebb10f454a83562fe9da6fcaf323ad9e",
+      "input_bytes": 134,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_135",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "2d63bafa4e799dd01e4f61f6c14d7b11bf84f5bc72aaa97d0cc71929f7b397d0",
+      "input_bytes": 135,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_136",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "0b3f8dd9c4e2e9766bb3afdf18e118beaca1fed65323d4ea09cfb85876853301",
+      "input_bytes": 136,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_137",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b217d6b905c7fb8df61aa95f7ef49b0a08eef8aef7813f0975e7b91e8565ffc7",
+      "input_bytes": 137,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_138",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "46958dfa29887fa81ece8bfabae827751e487daa903b9a6d442eb01f9e395001",
+      "input_bytes": 138,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_139",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e7c340e7925025faa1985d1cca5c4ed93da1d8c77ecd782d62c78daaed7bd613",
+      "input_bytes": 139,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_140",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "24b3472838967d0f58dcc7b35ccb32b42a7fafea3b7c1ce34a59f821bb5a7ae3",
+      "input_bytes": 140,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_141",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a3c5423f1873813ab735740efbb460a25399598779329fda873177cb40511cc9",
+      "input_bytes": 141,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_142",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8d14a3e02432c45c2c85ad3c37c8e4fc89985a3a4e65e0c0ce52d379da6f0f1b",
+      "input_bytes": 142,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_143",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "09698d62abe2774c5595a0c508e47982689c73ee8d0921519cf64e9f39a2e990",
+      "input_bytes": 143,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_144",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "c1b1cc4edc0f586622bfcdc22fc108357041f37aa0e9a25cd9a58fa7fffe06ab",
+      "input_bytes": 144,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_145",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d77f6d23bc5cfec977a2ca7f204c2fa42a5560041f4a96e3b0d02e9de36213fb",
+      "input_bytes": 145,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_146",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b7cf0808a405730f5fd191c8660b3d5364a6b4a1dcd606c75b36f416567cf2c2",
+      "input_bytes": 146,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_147",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b0290e0f05929a0b563e31589169aa3279468d2e3fa16510fa1001a3cd2865e2",
+      "input_bytes": 147,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_148",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "005a0c0039a2ba36a42ebac0e9ba51bd56fc36cd4113bfe218e6ad3ff2223757",
+      "input_bytes": 148,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_149",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8ae454f19500d451c448443ee2ba054c009eb09b6aa232e5f64ef5faba0382b3",
+      "input_bytes": 149,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_150",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "7fab58ed8eae72b0c15f391afec1c315527c6f63eb0eb44cdd1128ff6ce66a54",
+      "input_bytes": 150,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_151",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "dc10c2beda4f0fa9d7db7d8d848839bd4390394371df452de32e8981ce9a3f5a",
+      "input_bytes": 151,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_152",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b7e3f0ecb769a2cc525bbe24ea284a435d41e5d57c4741c7a557dff685a0ac5b",
+      "input_bytes": 152,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_153",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "f4f00622b45ccd8452f06048cfdb2a24c65a551adb34803e5309c513bf2193d3",
+      "input_bytes": 153,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_154",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "c2c07bb25806c058512046c6ba2c980fb8b39b1d8c4857fbfbb27ac56ed07c79",
+      "input_bytes": 154,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_155",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "bb147692a1b9d2d352c902fce6538505e571de2cf84b506ffd580bf08a9aae1b",
+      "input_bytes": 155,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_156",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "6da591e13500301839119148a63407c6ba437e58f9c66b94000ab5a66ee48e4c",
+      "input_bytes": 156,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_157",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "37a643779d15a9df25ef03bffa436f4741a83d53620d9ff0db4706d1a07ba389",
+      "input_bytes": 157,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_158",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "92c5d5dd7fa21d6e6c7d2eeae5086e35b58c8339d5551bf3805f34c9e738786f",
+      "input_bytes": 158,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_159",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4ce1d7991f00e57e59d792ad172501dc99bba30499e42999ab816d6d0655852c",
+      "input_bytes": 159,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_160",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9b9ef69f8b7db77b3f0dd5797f5ad4e0458ada1ad139d2832b51676b338f7cd1",
+      "input_bytes": 160,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_161",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d5cac3593a98985e42fb6d055d4aee567180727d7eefd2971fad211d4aa0bc16",
+      "input_bytes": 161,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_162",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8921884f947d31f1050a1f54c2f23fbf6274f902cd94dd1d9891e54edebc5974",
+      "input_bytes": 162,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_163",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b6f844f9d78ab48a697d140e36420341051bcba59d8cf1142d14f912de626f8d",
+      "input_bytes": 163,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_164",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "ad4d9670034125ccf5e2ce70e1d0b46383d5b32dd71d9ec2ca426fc0561e30ed",
+      "input_bytes": 164,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_165",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "e617455d219d2289eea724ecf78a071403003b9cfb0e104b871bfb1d62b7e57f",
+      "input_bytes": 165,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_166",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "55253094a7ff4ff49517445b44a70c2888b0c0364c6e4661e4f4447ebef44dae",
+      "input_bytes": 166,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_167",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "314db3dc74961271a8242797cdb3884827d214354279c21ae7b3b13d9ec639b1",
+      "input_bytes": 167,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_168",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "841a7e24ce158bf4a1e2a87d46959724a3bb86b859cfc69bbf16e5a843a7c67f",
+      "input_bytes": 168,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_169",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4da8a0a523595afa1da137cfda3b5f62c3763871eb84d15343b38b962dfd9534",
+      "input_bytes": 169,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_170",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b6142a4252695b7aaeae426d422a0e9eb02faf082bd6cdab116091fc2de2a85a",
+      "input_bytes": 170,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_171",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "1360df8abdd7048554174532acdd2f04d671f87b3075acf5451acb6350db0539",
+      "input_bytes": 171,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_172",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "69e232f6fa78ab3f1af196162489c0586e57ba39d1aefaffbfa11e2987a46151",
+      "input_bytes": 172,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_173",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "0f91f98fcd4954641e470e4b691f9eff3644143ef6ba2e3dab9e31dfaec40d18",
+      "input_bytes": 173,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_174",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "d88186da2073d1c58f479d2679bdc0d947caf2d6c0be3cd38c42ff6b2c773dc8",
+      "input_bytes": 174,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_175",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "60d036b5d7fe18910f242b04d773c0571dd00d3f4070271eb0eb85da73d75f1f",
+      "input_bytes": 175,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_176",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "582b7678c999864e4301b9d2ce8e58eb0396f7b8c75b30b1623eb6205962fa92",
+      "input_bytes": 176,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_177",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "789591aded3f171633821b5f0ab146a2cb718360c5b8803a9a51dbd04f366060",
+      "input_bytes": 177,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_178",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "f8c332bc135bded378a03010fbadd728c8200883bf5a297e27828363229dc42d",
+      "input_bytes": 178,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_179",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "0e12dcbe41fdc5f159c8345634f65850461023053c36c039ee5d850559023c4b",
+      "input_bytes": 179,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_180",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a389d937067c098718ff99815527e2ffa48ce5cd33296cdd4c75fe31cbe5346b",
+      "input_bytes": 180,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_181",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "7151e3fea22852be399ced647747da0c4bf08780dc8f59f6964ed91b390976da",
+      "input_bytes": 181,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_182",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "75e2f4cc1ac89c07435e183456fb8ac887c041e4a7829a26f518f9012ce4bac2",
+      "input_bytes": 182,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_183",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "ec3e237ab0bc932fdb59c2b3cae1491d64cbfdc200bf278ba4415fd4de0778ab",
+      "input_bytes": 183,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_184",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "39a7a04143828c3412c0fe6343137744248f2baaa0219b5c92aff55a0450543a",
+      "input_bytes": 184,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_185",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "f8c78dd6180977a82ae5fb0311af8f64e1496bbe9cc8cfac389cade6e118366e",
+      "input_bytes": 185,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_186",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b5a351eabe1b6368475793b9ec6712fc3488e5605116bb675a43ba3ecd90db8f",
+      "input_bytes": 186,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_187",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "1ded3ea27e4fb6db097702350f7f120d51b7ead9ac57c20c760c91719fa5dd4f",
+      "input_bytes": 187,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_188",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "786604ab2bdb255d54cd3eb99ab488eefd4595dd44d6eb6f57cef1803ad902d9",
+      "input_bytes": 188,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_189",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "213447e7202a8b105974d829305ee242fe0493cb4fa93378ed69086606b4d17c",
+      "input_bytes": 189,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_190",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "83a92d6dec61d909c59d396a9c15e6feed3985395254341abfa1dcd0d6060d92",
+      "input_bytes": 190,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_191",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "c5072e122c8388075ed995318e45f75d85a6c97dd418e6ac92d26706bdb78c52",
+      "input_bytes": 191,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_192",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "1a7cdcfa2f1db34aa4eae3f173da8cdc03ad67bc12fc18231b8169180b140b74",
+      "input_bytes": 192,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_193",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "859949759fff1d65e5e64778e0c625a230bb5ffc0bc58c24551aa696be0fb8ba",
+      "input_bytes": 193,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_194",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "5d03adc75aaffc565bc2e11dccf37df7753f59d01fdf9432234407dbebf87691",
+      "input_bytes": 194,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_195",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "ada1b6673ab6710403849fbbae7323704b792e78e6730bbc0748d26af8b01adc",
+      "input_bytes": 195,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_196",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "7c9d4ccbb3b8186feb087ebb312224df6417718fd97b3c620a2c19d3b8535ccb",
+      "input_bytes": 196,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_197",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "6d942c0c454eb54f9ca8adc8ee1f2920cbda2a70e38e18a04a0ca610a9dc9ecc",
+      "input_bytes": 197,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_198",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "5529dc4115f028c448971b180b81a35c103c7d11668d672287a5b867f3c1ce0b",
+      "input_bytes": 198,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_199",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "b8b0b80fd18648ceb29dfe4dc1c0c0ac528b93d989da93b7158d07014b685371",
+      "input_bytes": 199,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_200",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "9e197c251d7dd0ce69ee2834823d14015ac17c1726310c6227000fdf267ae9b5",
+      "input_bytes": 200,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_201",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "4e41b08c32ea912d4e5054f8d7ec228fed5e5e2ccd8e5bf075efd98c978ba0e5",
+      "input_bytes": 201,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_202",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "8eb33560905de4bf78f476bcbe23a7beceb5e0d459d5a77574403cd848a40aa0",
+      "input_bytes": 202,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_203",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "f87c0992ad1ebbe84fe4c369f442e2000bb0d058e1983422ab80142bb73f0349",
+      "input_bytes": 203,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_204",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "a6d9a069fd43b488c7656940b93c584c6ffff039dfeee061b52d0cdcd31d9fa0",
+      "input_bytes": 204,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_205",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "19692dfed03fc985948669f290e0d09e43799515736cbe5696e695dd80b9d737",
+      "input_bytes": 205,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "truncated_206",
+      "mode": "fcz",
+      "coverage": "truncation at every byte boundary",
+      "input_sha256": "7d6f880f9830abd8ea64d1bb955d4b21857ed0fadaeeaea4698c6b5aeb73c6e3",
+      "input_bytes": 206,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "trailing_byte",
+      "mode": "fcz",
+      "coverage": "exact section exhaustion",
+      "input_sha256": "150778591be8bdc818fbc3534413a3104896bfc6ad453623fcb0faa3ef1df4c7",
+      "input_bytes": 208,
+      "max_atoms": 5000000,
+      "output_sha256": "4e75a0741951b13fe7b8ae4218b7a96205e08ae3a333d566451fd81eb2fce1c7"
+    },
+    {
+      "name": "sidechain_count_valid_length",
+      "mode": "fcz",
+      "coverage": "length fits but residue codes require more sidechain bytes",
+      "input_sha256": "e9b020222ce060bc221f764757eaef9a33f0a10ceec4630f1976eb6ac2843e59",
+      "input_bytes": 206,
+      "max_atoms": 5000000,
+      "output_sha256": "8ec236f834234bb50cfe29473ef0a5b96ff974643297fca3adfc4c9475bc208b"
+    },
+    {
+      "name": "chain_nul",
+      "mode": "fcz",
+      "coverage": "CStr chain byte interpretation",
+      "input_sha256": "1b7c2d173a7ebf5a42d744a69a5cae8f4cd606ab13b3d8f1d1ff9ff2e93d4c83",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "3423d2b6e4e150e54afd5c33aafe44d110169b07376b84d7cc87ee5b33a49e59"
+    },
+    {
+      "name": "chain_invalid_utf8",
+      "mode": "fcz",
+      "coverage": "CStr chain byte interpretation",
+      "input_sha256": "7d8cf0d64b2bd28a24deee19d6c758d7277e5283d3a1f14c497538c27604c06a",
+      "input_bytes": 207,
+      "max_atoms": 5000000,
+      "output_sha256": "785d95c56efbdaed49b81b2956a6a69660e714275e9f5d70d6c6707aeee992ff"
+    },
+    {
+      "name": "last_anchor_not_final",
+      "mode": "fcz",
+      "coverage": "increasing in-range last anchor must equal final residue",
+      "input_sha256": "4006af8e0db9917d72312404aba81b94f8f77ae955686f0f94ba4d33eb583889",
+      "input_bytes": 218,
+      "max_atoms": 5000000,
+      "output_sha256": "80114d71802da786beb831c965c8b3466ea99a9f1f67f42c512d08414ec03495"
+    },
+    {
+      "name": "declared_atom_limit",
+      "mode": "fcz",
+      "coverage": "header count exceeds max_atoms",
+      "input_sha256": "de23958242728d95d65c92658bf9389c406bc0899c07cf41a3807618d146c85a",
+      "input_bytes": 207,
+      "max_atoms": 5,
+      "output_sha256": "56227459554d94c7e8c46798f724f6009b2cf877d7768028e2fc6fb785d70675"
+    },
+    {
+      "name": "reconstructed_atom_limit",
+      "mode": "fcz",
+      "coverage": "header fits but reconstructed full atoms exceed max_atoms",
+      "input_sha256": "de23958242728d95d65c92658bf9389c406bc0899c07cf41a3807618d146c85a",
+      "input_bytes": 207,
+      "max_atoms": 6,
+      "output_sha256": "7cfa715a21b6ec0f37c9579723fe9b3d13c3b9476f88c59b0b9344130e3cb62e"
+    },
+    {
+      "name": "database_0",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "801067268f339abb06c419f797e3b544a505cf164da8fcebaae6c9baf2ed106d",
+      "input_bytes": 2306,
+      "max_atoms": 5000000,
+      "output_sha256": "7343366d16c3a17d148167c6d50ed096c6eddf4cccaad5c2434ff71eecd54740"
+    },
+    {
+      "name": "database_1",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "43ef4547913f82ca99b0bdd43ba878e91ba952ca41f186d150f3a29cbf2706e1",
+      "input_bytes": 2071,
+      "max_atoms": 5000000,
+      "output_sha256": "00f4d9acac395f6a814909be6d6fa09c5064e65091a46bacf3a235c1674f68a9"
+    },
+    {
+      "name": "database_2",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "f8c80b51fbd896a4c0cde8bf4dfcd2c0e8f4daacb05756455e84ce9db04c2f7b",
+      "input_bytes": 2146,
+      "max_atoms": 5000000,
+      "output_sha256": "16f658307246eb5eb4f2a54f1dab3d65d12f9103b6395cd03270a66cdd762efb"
+    },
+    {
+      "name": "database_3",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "85feb852189ee4043561fea87e05fffa0414947eceeb1c05b781a8c2db2d0113",
+      "input_bytes": 2184,
+      "max_atoms": 5000000,
+      "output_sha256": "afe27b3b8d3f7322bf705ecee3b8eac1fcc1520afc4597aff9c6137c309b29ab"
+    },
+    {
+      "name": "database_4",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "9c37127d29531509104823800c83e74e762700aed0a213fc684a54e1dc620d49",
+      "input_bytes": 2246,
+      "max_atoms": 5000000,
+      "output_sha256": "b20a03dfbb91af6129852cbe6539ff9ca7dca1c6126a32038ab288be38de9fde"
+    },
+    {
+      "name": "database_5",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "432cb54337f96a61ef8c6cb001a30b34f5d77caf562aa6e45764a00318e583ef",
+      "input_bytes": 2044,
+      "max_atoms": 5000000,
+      "output_sha256": "c87805c3a4fc52c78c5b6a1cde48536ddeb65c73a102fbc7cb9043be9cb5438b"
+    },
+    {
+      "name": "database_6",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "e091676f14f71a9e51e9feaa36d4ec2f7d637af75746f7a794adbc2916081ac1",
+      "input_bytes": 2358,
+      "max_atoms": 5000000,
+      "output_sha256": "a23c6b6e60edbbb77f1ee9d60b0c400a5eb95dcedc49f309691a84d7e0e18eb7"
+    },
+    {
+      "name": "database_7",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "744b081b521bee89d1e6bf1b337b3399ad395b6c7fe876f64ea79f5c2802a6dd",
+      "input_bytes": 2249,
+      "max_atoms": 5000000,
+      "output_sha256": "a525499b2b7fdd8298bb00c421fc8dfdefe672bfc7a62133482403334cffbbc5"
+    },
+    {
+      "name": "database_8",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "f0d56b10e01b5521b26466a339661b1fc127cab423cecab3a16308b8eb68694c",
+      "input_bytes": 2092,
+      "max_atoms": 5000000,
+      "output_sha256": "1cc5c1f297c9f67d8061781adf39d1540695b3e7b561cbbf222bcec0559c6905"
+    },
+    {
+      "name": "database_9",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "4e57d60d3ec3f83571e6ffc3f76910388a75abe9f05b72bb86d57126334f220f",
+      "input_bytes": 2114,
+      "max_atoms": 5000000,
+      "output_sha256": "3fa11c2abeba6e1efd0d01b90dc93dd792aa65cfcdaf5f2530fe002fdb522e4e"
+    },
+    {
+      "name": "database_10",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "03a3dc1f3aae4273660a70bf1acbdc00b267a20b197875dccb4a99e0e2edbaa4",
+      "input_bytes": 2142,
+      "max_atoms": 5000000,
+      "output_sha256": "e2d86e8bbee5d3674dd8b5dcc786f299530894cb9f0ca34df7588808131e96a7"
+    },
+    {
+      "name": "database_11",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "2246b0a15a7daeca7aaae7e82e733246efec067f32e2974f6a145bd3946a5cea",
+      "input_bytes": 2339,
+      "max_atoms": 5000000,
+      "output_sha256": "acffbf13a6bca99da432067966a926458c70f382755e142d10fcd3e268e079f7"
+    },
+    {
+      "name": "database_12",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "68b715faaae8203b1eb6161bade6d75a6f48434481699fd09f0a2254f1bf87e6",
+      "input_bytes": 2244,
+      "max_atoms": 5000000,
+      "output_sha256": "61be595c3c0450062de0f5e14029bc58ca2fd3ed870179bd69fb75317865f88c"
+    },
+    {
+      "name": "database_13",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "ee4244d3573b5c49152dc0e9affb7fc451115f9b23a8cdc043f0b638dd40cffc",
+      "input_bytes": 1999,
+      "max_atoms": 5000000,
+      "output_sha256": "6eeb29afb33a9b9d69d1b00b1d8881a22d396ac218246f9bb5e92e7c4993479c"
+    },
+    {
+      "name": "database_14",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "e69a675e2aa93003d2a08261fe2da0e3fde7d508d252a0076c18ef333a6e2bda",
+      "input_bytes": 2340,
+      "max_atoms": 5000000,
+      "output_sha256": "30d1c9c4a95518332c74496d78d207f26d81b208ee17a20b8baa1ff0d58ed977"
+    },
+    {
+      "name": "database_15",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "d3b4a64d1f8978d87b6704564d4fc7d2efae96b338c63dbed352f01a33855012",
+      "input_bytes": 2268,
+      "max_atoms": 5000000,
+      "output_sha256": "5968e299942bcd651a109626d53b649d8c1ae1fbe2e070c677b52d950bbd337b"
+    },
+    {
+      "name": "database_16",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "407474d2d3eda7bf5647e783b70765e3c78f311cd162f72d6362b288272a590a",
+      "input_bytes": 2152,
+      "max_atoms": 5000000,
+      "output_sha256": "6234f99515455ff49fbb755fca930e10c17e8b001f2f5f9c52786d3615254219"
+    },
+    {
+      "name": "database_17",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "9573d44d4c2d3aa369ee40d3b6cb43331f4bfcf50610d5753be0479d25cd3440",
+      "input_bytes": 2279,
+      "max_atoms": 5000000,
+      "output_sha256": "78d33eb2624633ffd7ea2a78eb58bf0b5d2cde04824a277a76de8186f7d22a45"
+    },
+    {
+      "name": "database_18",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "bfe38d47fa09a86ef78b998383e6c8d5c6a39c048b7467518bd5517520402d32",
+      "input_bytes": 2141,
+      "max_atoms": 5000000,
+      "output_sha256": "1c2940df063072c4bc8d8141e764abf5e4053e0bc5e3e9d5b678e95b57f0c404"
+    },
+    {
+      "name": "database_19",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "281948ce720577fa90a9838ba0371f6d2f7e24a17d64ef1ba456221056fbfcaa",
+      "input_bytes": 2186,
+      "max_atoms": 5000000,
+      "output_sha256": "f9bb43e2b5024ae63d039d39e520288790457d7404fd988a6780206fb8dbffc1"
+    },
+    {
+      "name": "database_20",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "3d9df92463c3c7ffa7b855176b210d1676997a2515b33ca20044239874bd7555",
+      "input_bytes": 2151,
+      "max_atoms": 5000000,
+      "output_sha256": "b7424daecabfcefabf0cf373e20fee0533e9a071798fa4c903c29d0058e28926"
+    },
+    {
+      "name": "database_21",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "8e60833ffad89366cde22f4cc569fc22465552df9e92aacdf8924812521035f0",
+      "input_bytes": 2182,
+      "max_atoms": 5000000,
+      "output_sha256": "e0cbe629d5ba2f64fd11011cc8fdc3fbd54fa42f748db19d0f51ac0d82d91eb2"
+    },
+    {
+      "name": "database_22",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "0a01300323a959b5de410fc2d26dffa19038e494d9a05fbad3e7d3da3dcf0000",
+      "input_bytes": 2096,
+      "max_atoms": 5000000,
+      "output_sha256": "c32953663955a35deaf300c8dd6debfd9955043721c8d9ab244aa723f8468a44"
+    },
+    {
+      "name": "database_23",
+      "mode": "fcz",
+      "coverage": "official database record, selected range excluding terminator",
+      "input_sha256": "8937c3dea3f8da98e8da6a067c755d1867eba44457b28d4db7511779acb1bee0",
+      "input_bytes": 2050,
+      "max_atoms": 5000000,
+      "output_sha256": "9275576b4d2e6e3917d5eab0f4e983e9d9dd099c4f927e2c10df8aa0bc4ed22c"
+    }
+  ]
+}

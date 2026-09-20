@@ -1,0 +1,91 @@
+# Pinned structure-codec reference
+
+This is development tooling for the repository-owned Rust CIF parser and FCZ
+decoder. Production dependencies and readers are unchanged. The reference uses
+formats commit `fd17754c55c63394717967c18b7a45cf8aeb48ee`, regardless of the
+currently checked-out branch or edits to its native files.
+
+## Reproduce
+
+Requires Python 3.12+, Git with the pinned commit available locally, and a C++17
+compiler. No Python packages, network requests, Cargo builds or Python extension
+installation are needed. Run from the repository root:
+
+```sh
+python3 testing/oracles/structure-codecs/capture.py --check
+python3 testing/oracles/structure-codecs/reference.py cif testing/data/structure/1ubq.cif
+python3 testing/oracles/structure-codecs/reference.py fcz testing/data/structure/1ubq.fcz
+python3 testing/oracles/structure-codecs/reference.py tables
+```
+
+`reference.py` extracts the two native directories with `git archive` into a
+temporary checkout, builds `reference.cpp` against those exact files, and runs
+the executable as a separate process with a per-input timeout. The FCZ adapter
+validates each payload before the unchecked upstream reader sees it. The build
+is cached under ignored `target/structure-codec-reference/`, keyed by source,
+driver, compiler, flags and platform. Each cache has `build.json` provenance.
+Set `CXX` to select a compiler; MSVC needs a developer shell and `CXX=cl`.
+The MSVC command path exists but has not been tested on Windows.
+
+`--check` regenerates observations in memory, compares them and their hashes,
+and never rewrites committed files. `capture.py --record` intentionally replaces
+the baseline; review its diff. A mismatch is a failed check, not permission to
+update goldens automatically. The current strict recording is macOS arm64 with
+Apple Clang 16. Other platforms may differ in floating-point bits; investigate
+those differences before establishing platform acceptance. This reproducibility
+check does not replace the migration's numerical-tolerance/platform gates.
+
+## Artifacts and independent checks
+
+- `corpus.py`: handwritten CIF probes and explicitly packed FCZ byte layouts;
+  neither uses a production Rust parser/decoder to construct expected fields.
+- `inputs.json`: tiny probe bytes in hex and `max_atoms` settings, consumable by
+  offline Rust tests without executing Python or C++ reference tooling.
+- `golden.json`: raw CIF block/column/null values; FCZ header, anchors, packed
+  fields, discretizers, restored angles, and full decoded atoms for small cases
+  and 1UBQ. The existing 24 database entries retain full-array hashes and coverage
+  summaries instead of duplicating their larger decoded datasets in Git.
+- `residue-codes.json`: all 32 code mappings, support decisions, sidechain and
+  reconstructed atom counts from the pinned upstream tables.
+- `manifest.json`: input/output/source hashes, original build provenance,
+  per-case coverage, and measured independent checks.
+- `check_contract.py`: compares handwritten nulls, packed integers, residue
+  identities, counts, numbering and analytical B factors. It also checks all
+  602 1UBQ decoded atom identities/coordinates against the pre-existing,
+  independently generated Python Foldcomp oracle.
+
+Float32 fields are stored as unsigned IEEE-754 bit patterns, preserving signed
+zero and exact values. Atom rows are
+`[name_hex, residue_hex, chain_hex, atom_id, residue_id, x_bits, y_bits, z_bits, b_bits]`.
+Backbone rows are `[residue, phi, psi, omega, n_ca_c, ca_c_n, c_n_ca]`.
+The parameter bit rows use the same six-angle order, excluding the residue code.
+Raw strings use hex across the subprocess boundary so UTF-8 validation can be
+distinguished from native syntax acceptance. CIF views use explicit lengths;
+FCZ decoded strings reproduce the legacy adapter's NUL-terminated conversion.
+
+The corpus contains 355 cases: 56 CIF and 299 FCZ, including the 24 database
+entries. The Rust contract tests consume all 331 small/1UBQ cases; existing
+database/provider integration tests continue to cover database execution.
+Synthetic anchors test codec mechanics, not biological plausibility.
+
+## Provenance and limits
+
+The immutable reference archive retains its original source/license files:
+
+- Gemmi 0.7.5, commit `5cc1c23c6007e0e6cbd69289c6f7c0bff50e943e`, MPL-2.0;
+  bundled PEGTL, MIT. The reference uses the existing `cif_bridge.cpp`.
+- Foldcomp commit `89e37195d3c8ade8d40ead91ad82e6cd2964a967`, MIT;
+  bundled span, Boost Software License 1.0, and Windows dirent, MIT.
+  The byte layout and synthetic residue code/count constants follow
+  `foldcomp.h`, `foldcomp.cpp` and `utility.h` at that revision.
+- Existing 1UBQ/database fixture provenance remains in
+  [the original oracle manifest](../structure/manifest.json) and
+  [oracle README](../structure/README.md).
+
+No production Rust parser or decoder is introduced by this baseline commit.
+The concrete interfaces, measured compatibility rules, layout and algorithm
+mapping are in [BASELINE.md](../../../openspec/changes/refactor-structure-codecs-to-rust/BASELINE.md).
+Long-chain/degenerate-geometry coverage, fuzz budgets, release performance,
+other platforms, consumer wheels and a cross-platform B-factor tolerance
+remain open. The captured error strings document the reference; future Rust
+errors must retain useful source/block context but need not copy Gemmi wording.

@@ -1,17 +1,18 @@
 # Implementation checklist
 
-All items are planned, not completed. The design defines stage gates and the
-immutable baseline. Keep implementation and measured validation evidence in a
-future `IMPLEMENTATION.md`; do not convert proposed thresholds into claimed results.
+The design defines stage gates and the immutable baseline. Completed local R0
+work is checked below; [IMPLEMENTATION.md](IMPLEMENTATION.md) records measured
+evidence and [BASELINE.md](BASELINE.md) records the concrete contract/design.
+R0.7 and the production replacement stages remain open.
 
 ## R0. Freeze the contract and internal Rust design
 
-- [ ] R0.1 Reconcile the source contract with existing OpenSpec requirements and remaining `add-structure-readers` gates; record the actual toolchain and provider/consumer revisions.
-- [ ] R0.2 Inventory CIF categories/syntax and FCZ layouts actually used; define accepted inputs, errors, limits, metadata, ordering and feature combinations.
-- [ ] R0.3 Build a reference harness in a separate pinned checkout/process that emits raw CIF values and FCZ intermediate/decoded arrays. Keep production dependencies untouched.
-- [ ] R0.4 Expand the small hashed corpus to cover quoting/nulls/blocks/models/metadata and all supported residue codes, multi-anchor chains, OXT, B factors and malformed FCZ fields. Document coverage gaps explicitly.
-- [ ] R0.5 Design the repository-owned CIF tokenizer/document API, raw-value representation, contextual errors and bounded storage; validate the design against syntax/metadata fixtures and record source provenance.
-- [ ] R0.6 Map the required upstream Foldcomp algorithms and residue constants to internal Rust modules, including anchor correction, side chains and numeric semantics; record attribution for translated portions.
+- [x] R0.1 Reconcile the source contract with existing OpenSpec requirements and remaining `add-structure-readers` gates; record the actual toolchain and provider/consumer revisions.
+- [x] R0.2 Inventory CIF categories/syntax and FCZ layouts actually used; define accepted inputs, errors, limits, metadata, ordering and feature combinations.
+- [x] R0.3 Build a reference harness in a separate pinned checkout/process that emits raw CIF values and FCZ intermediate/decoded arrays. Keep production dependencies untouched.
+- [x] R0.4 Expand the small hashed corpus to cover quoting/nulls/blocks/models/metadata and all supported residue codes, multi-anchor chains, OXT, B factors and malformed FCZ fields. Document coverage gaps explicitly.
+- [x] R0.5 Design the repository-owned CIF tokenizer/document API, raw-value representation, contextual errors and bounded storage; validate the design against syntax/metadata fixtures and record source provenance.
+- [x] R0.6 Map the required upstream Foldcomp algorithms and residue constants to internal Rust modules, including anchor correction, side chains and numeric semantics; record attribution for translated portions.
 - [ ] R0.7 Capture supported-platform reference results, current numerical tolerances including B factors, release benchmarks and budgets; re-estimate the remaining work.
 
 Gate: reproducible baseline, concrete internal module designs and explicit acceptance criteria.

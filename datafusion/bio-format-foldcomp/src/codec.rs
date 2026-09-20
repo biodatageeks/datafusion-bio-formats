@@ -92,3 +92,7 @@ pub fn decode(data: &[u8], options: &StructureOptions) -> Result<NormalizedEntry
         Ok(entry)
     }
 }
+
+#[cfg(test)]
+#[path = "codec_contract_tests.rs"]
+mod contract_tests;

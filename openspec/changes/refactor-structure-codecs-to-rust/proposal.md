@@ -58,7 +58,9 @@ Planning baseline, inspected 2026-09-20:
 This is a follow-up to the existing readers, with its own branch and review.
 It does not change PR #461 or decide when that PR should merge. If integration
 starts before #461 merges, test against its exact head and revalidate against
-the eventual merged revision. Implementation tasks remain unstarted.
+the eventual merged revision. R0 baseline work has started on the separate
+`feat/rust-structure-codecs` branch; [IMPLEMENTATION.md](IMPLEMENTATION.md)
+records completed work and outstanding gates.
 
 Confirmed user decision: implement both replacements in this repository.
 External parser/codec implementations serve as reference material and test
