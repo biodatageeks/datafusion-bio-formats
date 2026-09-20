@@ -12,8 +12,9 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::ops::Range;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::AsyncReadExt;
+use tokio::sync::OnceCell;
 use tokio_util::io::StreamReader;
 use url::Url;
 
@@ -22,7 +23,8 @@ use url::Url;
 pub struct ObjectStorageOptions {
     /// Chunk size in MB for reading data
     pub chunk_size: Option<usize>,
-    /// Number of concurrent fetch operations
+    /// Number of concurrent fetch operations. For S3, `None`, zero, and one
+    /// preserve a single streaming GET; parallel reads require an explicit value > 1.
     pub concurrent_fetches: Option<usize>,
     /// Allow anonymous access to cloud storage
     pub allow_anonymous: bool,
@@ -346,13 +348,11 @@ pub async fn get_remote_stream_bgzf_async(
 
 /// Opens a BGZF reader over one sequential request, without a size preflight.
 ///
-/// [`get_remote_stream_bgzf_async`] streams the whole object through the
-/// configured reader chunking, which asks the backend for the object length and
-/// so issues a HEAD. A pre-signed URL that authorizes GET and range requests but
-/// not HEAD therefore fails there, even though every later read the caller makes
-/// would have succeeded. Reading a bounded prefix — a header — needs no length,
-/// so it goes through a single request instead. The caller is responsible for
-/// bounding how much it consumes.
+/// [`get_remote_stream_bgzf_async`] uses the configured reader chunking, which
+/// may ask the backend for the object length with a HEAD before falling back
+/// if it is refused. Reading a bounded prefix — a header — needs no length,
+/// so this helper goes straight to a single request, avoiding that preflight
+/// round trip entirely. The caller is responsible for bounding how much it consumes.
 pub async fn get_remote_stream_bgzf_single_request(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -676,11 +676,49 @@ fn configured_s3_region(region: Option<String>, default_region: Option<String>) 
         .or(default_region.filter(|r| !r.is_empty()))
 }
 
-/// Buckets whose region has already been detected in this process.
-static S3_REGION_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+/// Per-bucket cells share successful detections and coordinate concurrent opens.
+#[derive(Default)]
+struct S3RegionCache {
+    buckets: Mutex<HashMap<String, Arc<OnceCell<String>>>>,
+}
+
+impl S3RegionCache {
+    async fn resolve<F, Fut>(
+        &self,
+        bucket: &str,
+        configured_region: Option<String>,
+        detect: F,
+    ) -> String
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Option<String>>,
+    {
+        if let Some(region) = configured_region {
+            return region;
+        }
+        let cell = {
+            let mut buckets = self
+                .buckets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(buckets.entry(bucket.to_string()).or_default())
+        };
+        // Never hold the map lock over a network await: different buckets can
+        // resolve independently. The cell permits only one detector per bucket
+        // at a time and retains only successful results. Failure or cancellation
+        // leaves it uninitialized so another caller can retry.
+        cell.get_or_try_init(|| async { detect().await.ok_or(()) })
+            .await
+            .cloned()
+            .unwrap_or_else(|()| "us-east-1".to_string())
+    }
+}
+
+static S3_REGION_CACHE: OnceLock<S3RegionCache> = OnceLock::new();
 
 /// Resolves the bucket's region without a network round trip when the
-/// environment names one, and detects it at most once per bucket otherwise.
+/// environment names one. Otherwise concurrent opens share a successful
+/// detection per bucket; failed or cancelled detections may be retried.
 ///
 /// The previous code nested `detect_region(..).await` inside `unwrap_or`,
 /// which Rust evaluates eagerly, so the detection request ran on every open
@@ -688,42 +726,33 @@ static S3_REGION_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new
 /// then data), each on a fresh connection, so that was two extra round trips
 /// per file before the first byte of content arrived.
 async fn resolve_s3_region(bucket: &str) -> String {
-    if let Some(region) = configured_s3_region(
+    let configured_region = configured_s3_region(
         env::var("AWS_REGION").ok(),
         env::var("AWS_DEFAULT_REGION").ok(),
-    ) {
-        return region;
-    }
-    let cache = S3_REGION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(region) = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(bucket)
-    {
-        return region.clone();
-    }
-    // Only a successful detection is remembered: a transient failure must
-    // not pin the fallback region for the rest of the process.
-    let detected = S3::detect_region("https://s3.amazonaws.com", bucket).await;
-    if let Some(region) = &detected {
-        cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(bucket.to_string(), region.clone());
-    }
-    detected.unwrap_or_else(|| "us-east-1".to_string())
+    );
+    S3_REGION_CACHE
+        .get_or_init(S3RegionCache::default)
+        .resolve(bucket, configured_region, || {
+            S3::detect_region("https://s3.amazonaws.com", bucket)
+        })
+        .await
 }
 
 /// Reader settings for S3 as `(chunk size in bytes, concurrent fetches)`.
 ///
-/// One fetch keeps a single streaming GET: opendal needs no chunk size for
+/// An absent or zero fetch count is normalized to one. One fetch keeps a
+/// single streaming GET: opendal needs no chunk size for
 /// that, so it also issues no HEAD preflight, which pre-signed URLs and
 /// buckets without HEAD rights depend on. Sequential chunked reads were
 /// measured slower than one stream, so chunking is only worth enabling
 /// together with concurrency; that is what the AWS CLI does. A chunk size
 /// of zero falls back to the 8 MiB default rather than producing empty
 /// range requests.
-fn s3_reader_settings(chunk_size_mib: usize, concurrent_fetches: usize) -> (Option<usize>, usize) {
+fn s3_reader_settings(
+    chunk_size_mib: usize,
+    concurrent_fetches: Option<usize>,
+) -> (Option<usize>, usize) {
+    let concurrent_fetches = concurrent_fetches.unwrap_or(1);
     if concurrent_fetches <= 1 {
         return (None, 1);
     }
@@ -765,11 +794,13 @@ impl RemoteObject {
 
         let (operator, path, reader_chunk_size, reader_concurrency) = match storage_type {
             StorageType::S3 => {
+                let (reader_chunk, reader_concurrency) =
+                    s3_reader_settings(chunk_size, object_storage_options.concurrent_fetches);
                 log::info!(
                     "Using S3 storage type with parameters: \
                 bucket_name: {bucket_name}, \
                 chunk_size: {chunk_size}, \
-                concurrent_fetches: {concurrent_fetches}, \
+                concurrent_fetches: {reader_concurrency}, \
                 allow_anonymous: {allow_anonymous}, \
                 enable_request_payer: {enable_request_payer}, \
                 max_retries: {max_retries}, \
@@ -794,8 +825,6 @@ impl RemoteObject {
                     .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
                     .layer(LoggingLayer::default())
                     .finish();
-                let (reader_chunk, reader_concurrency) =
-                    s3_reader_settings(chunk_size, concurrent_fetches);
                 (
                     operator,
                     relative_file_path,
@@ -804,6 +833,7 @@ impl RemoteObject {
                 )
             }
             //FIXME: Currently, Azure Blob Storage does not support anonymous access
+            // TODO: Honor concurrent_fetches for Azure after validating ranged reads.
             StorageType::AZBLOB => {
                 let blob_info = extract_account_and_container(&file_path);
                 log::info!(
@@ -1228,25 +1258,28 @@ mod s3_reader_settings_tests {
     #[test]
     fn a_single_fetch_keeps_one_streaming_get() {
         // No chunk size => opendal StreamingReader: one GET, no HEAD preflight.
-        assert_eq!(s3_reader_settings(8, 1), (None, 1));
-        assert_eq!(s3_reader_settings(8, 0), (None, 1));
+        assert_eq!(s3_reader_settings(8, Some(1)), (None, 1));
+        assert_eq!(s3_reader_settings(8, Some(0)), (None, 1));
+        assert_eq!(s3_reader_settings(8, None), (None, 1));
     }
 
     #[test]
     fn concurrent_fetches_enable_chunked_ranged_reads() {
-        assert_eq!(s3_reader_settings(8, 8), (Some(8 * 1024 * 1024), 8));
-        assert_eq!(s3_reader_settings(64, 2), (Some(64 * 1024 * 1024), 2));
+        assert_eq!(s3_reader_settings(8, Some(8)), (Some(8 * 1024 * 1024), 8));
+        assert_eq!(s3_reader_settings(64, Some(2)), (Some(64 * 1024 * 1024), 2));
     }
 
     #[test]
     fn a_zero_chunk_size_falls_back_to_the_default_chunk() {
-        assert_eq!(s3_reader_settings(0, 4), (Some(8 * 1024 * 1024), 4));
+        assert_eq!(s3_reader_settings(0, Some(4)), (Some(8 * 1024 * 1024), 4));
     }
 }
 
 #[cfg(test)]
 mod s3_region_tests {
-    use super::configured_s3_region;
+    use super::{S3RegionCache, configured_s3_region};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn aws_region_wins_over_default_region() {
@@ -1272,5 +1305,133 @@ mod s3_region_tests {
             configured_s3_region(Some(String::new()), Some("us-east-1".into())),
             Some("us-east-1".into())
         );
+    }
+
+    #[tokio::test]
+    async fn configured_region_bypasses_detection_and_does_not_replace_cached_region() {
+        let cache = S3RegionCache::default();
+        for configured in [
+            configured_s3_region(Some("eu-west-1".into()), Some("us-east-1".into())),
+            configured_s3_region(None, Some("eu-west-1".into())),
+        ] {
+            assert_eq!(
+                cache
+                    .resolve("bucket", configured, || async {
+                        panic!("configured regions must bypass detection")
+                    })
+                    .await,
+                "eu-west-1"
+            );
+        }
+        assert_eq!(
+            cache
+                .resolve("bucket", None, || async { Some("ap-south-1".into()) })
+                .await,
+            "ap-south-1"
+        );
+        assert_eq!(
+            cache
+                .resolve("bucket", Some("eu-west-1".into()), || async {
+                    panic!("configuration must override the cached region")
+                })
+                .await,
+            "eu-west-1"
+        );
+        assert_eq!(
+            cache
+                .resolve("bucket", None, || async { panic!("expected a cache hit") })
+                .await,
+            "ap-south-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_opens_share_detection_and_later_opens_use_the_cache() {
+        let cache = S3RegionCache::default();
+        let detections = AtomicUsize::new(0);
+        let opens = (0..16).map(|_| {
+            cache.resolve("bucket", None, || async {
+                detections.fetch_add(1, Ordering::SeqCst);
+                // Let every opener encounter the in-flight detection.
+                tokio::task::yield_now().await;
+                Some("eu-west-1".into())
+            })
+        });
+        let regions = futures::future::join_all(opens).await;
+        assert!(regions.iter().all(|region| region == "eu-west-1"));
+        assert_eq!(detections.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cache
+                .resolve("bucket", None, || async { panic!("expected a cache hit") })
+                .await,
+            "eu-west-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_detection_returns_fallback_but_allows_a_later_retry() {
+        let cache = S3RegionCache::default();
+        assert_eq!(
+            cache.resolve("bucket", None, || async { None }).await,
+            "us-east-1"
+        );
+        assert_eq!(
+            cache
+                .resolve("bucket", None, || async { Some("eu-west-1".into()) })
+                .await,
+            "eu-west-1"
+        );
+        assert_eq!(
+            cache
+                .resolve("bucket", None, || async { panic!("expected a cache hit") })
+                .await,
+            "eu-west-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn different_buckets_can_detect_regions_independently() {
+        let cache = S3RegionCache::default();
+        let started = tokio::sync::Notify::new();
+        let release = tokio::sync::Notify::new();
+        let first = cache.resolve("first", None, || async {
+            started.notify_one();
+            release.notified().await;
+            Some("eu-west-1".into())
+        });
+        let second = async {
+            started.notified().await;
+            let region = cache
+                .resolve("second", None, || async { Some("ap-south-1".into()) })
+                .await;
+            release.notify_one();
+            region
+        };
+        let regions = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("one bucket's detection must not block another bucket");
+        assert_eq!(regions, ("eu-west-1".into(), "ap-south-1".into()));
+    }
+
+    #[tokio::test]
+    async fn cancelled_detection_allows_a_later_retry() {
+        let cache = S3RegionCache::default();
+        let started = tokio::sync::Notify::new();
+        tokio::select! {
+            _ = cache.resolve("bucket", None, || async {
+                started.notify_one();
+                std::future::pending::<Option<String>>().await
+            }) => panic!("detection should remain pending until cancelled"),
+            _ = started.notified() => {}
+        }
+        let region = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.resolve("bucket", None, || async { Some("eu-west-1".into()) }),
+        )
+        .await
+        .expect("cancelling detection must release the per-bucket cell");
+        assert_eq!(region, "eu-west-1");
     }
 }

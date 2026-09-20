@@ -13,13 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   did: with `concurrent_fetches > 1` a whole-object read is split into parallel
   ranged GETs (the AWS CLI's strategy), which read a public 89 MB A3M about
   1.7x faster than the single sequential GET that was hard-coded for S3.
-  `concurrent_fetches <= 1` keeps the one streaming GET, so nothing changes
+  `concurrent_fetches <= 1` (or `None`) keeps the one streaming GET, so nothing changes
   for callers on the default and no HEAD preflight is introduced for them;
-  when a backend refuses the HEAD, the read falls back to one request.
+  when a backend refuses the HEAD, the read falls back to one request. This
+  fallback now applies to full-object streams on every remote backend (S3,
+  GCS, HTTP, and Azure), as it already did for BGZF readers.
 - The S3 region is no longer re-detected on every open: `AWS_REGION` /
   `AWS_DEFAULT_REGION` short-circuit detection (the old `unwrap_or` chain
-  evaluated `detect_region` eagerly), and a detected region is cached per
-  bucket for the process.
+  evaluated `detect_region` eagerly); empty values count as unset. A detected
+  region is cached per bucket for the process, and concurrent opens of the
+  same bucket share the detection. Failed or cancelled detections can be retried.
 - PGEN text companions are now streamed: the `.pvar` (plain, gzip, or zstd) is
   decoded and parsed in bounded, newline-aligned blocks on a worker pool, and
   the parsed variants live in a columnar `PvarTable` (interned contigs,
