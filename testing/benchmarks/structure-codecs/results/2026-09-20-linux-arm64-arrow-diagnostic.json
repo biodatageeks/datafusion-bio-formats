@@ -1,0 +1,823 @@
+{
+  "platform": "Linux-6.12.76-linuxkit-aarch64-with-glibc2.41",
+  "machine": "aarch64",
+  "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)",
+  "revision": "1be733afa79e9cd5af328d9e32ee603bc3eacea9",
+  "diff_sha256": "7345441ced533826613e3eddad561cdde1d2b7c1305af235c9af4be5e4c2ee90",
+  "cargo_lock_sha256": "e611e975c17f24aac37416f5c368c9165e895364cb13d99d3a6cefbe0fe3577d",
+  "binaries": {
+    "structure": {
+      "sha256": "9b2b20781005868d17702d72b0ad167ae26714ccf42f10c2aa0789578e702bb2",
+      "path": "/Users/mwiewior/research/git/datafusion-bio-formats-rust-structure-plan/target/probe-build/release/deps/datafusion_bio_format_structure-21a9ad2b7f24b0c9"
+    },
+    "foldcomp": {
+      "sha256": "c96dc6f0f8ca75566b1677f31954cb103c8d509f2656dbde8bde1de842bd0021",
+      "path": "/Users/mwiewior/research/git/datafusion-bio-formats-rust-structure-plan/target/probe-build/release/deps/datafusion_bio_format_foldcomp-2f4c33933c0a2d9e"
+    }
+  },
+  "samples": 9,
+  "calibration_seconds": 1.0,
+  "method": "alternating paired fresh processes; 2 untimed warmups; preloaded input; no cache flush; query uses shared EntrySource harness; complete materialization",
+  "threshold_ratio": 1.1,
+  "noise_limit_mad_ratio": 0.05,
+  "inputs": {
+    "fcz_long_mixed": [
+      {
+        "file": "long_mixed.fcz",
+        "offset": 0,
+        "length": 15750,
+        "sha256": "e7c7cfdfd260d9df548aa3dda3749d926c3efb9abbf1220ea55d5c8409947d74"
+      }
+    ],
+    "fcz_long_segment": [
+      {
+        "file": "long_segment.fcz",
+        "offset": 0,
+        "length": 41146,
+        "sha256": "f3e6a7ae5e904b40a386f863a30966bd790423679067759cdef5caa278f45992"
+      }
+    ]
+  },
+  "results": [
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "arrow",
+      "level": "atom",
+      "workers": 1,
+      "iterations": 1340,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.016917594,
+            "peak_rss_bytes": 39006208
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.199626583000001,
+            "peak_rss_bytes": 39378944
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.058521805,
+            "peak_rss_bytes": 40992768
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.0473229160000004,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.0151052979999995,
+            "peak_rss_bytes": 38998016
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.0843694860000015,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.070336807000001,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.165019798,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.241586030000004,
+            "peak_rss_bytes": 38998016
+          }
+        ],
+        "rust": [
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.0085333599999993,
+            "peak_rss_bytes": 37613568
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.006497122000001,
+            "peak_rss_bytes": 37761024
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.0428264220000012,
+            "peak_rss_bytes": 37724160
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.0945588430000008,
+            "peak_rss_bytes": 37634048
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.032224745999999,
+            "peak_rss_bytes": 37654528
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.0592822460000004,
+            "peak_rss_bytes": 37789696
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.1045265829999975,
+            "peak_rss_bytes": 37715968
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.1331484870000001,
+            "peak_rss_bytes": 37777408
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 21105000,
+            "iterations": 1340,
+            "rows": 11637900,
+            "seconds": 1.1115910209999995,
+            "peak_rss_bytes": 37781504
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0007987588111940306,
+          "mad_ratio": 0.04990878819698576,
+          "peak_rss_bytes": 39002112,
+          "rss_mad_ratio": 0.00010501995379122033,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0007905091388059705,
+          "mad_ratio": 0.04271225839085482,
+          "peak_rss_bytes": 37724160,
+          "rss_mad_ratio": 0.0015200868621064061,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 0.9896718855899342,
+      "rust_native_rss_ratio": 0.9672337744171392,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "arrow",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 707,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.933227591000001,
+            "peak_rss_bytes": 38989824
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.8542966710000002,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.8447482050000009,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.8448167599999997,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.8703599809999993,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.877873463,
+            "peak_rss_bytes": 41111552
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.8851088510000001,
+            "peak_rss_bytes": 39002112
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9230161759999991,
+            "peak_rss_bytes": 40914944
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.891335993,
+            "peak_rss_bytes": 39002112
+          }
+        ],
+        "rust": [
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9707835030000005,
+            "peak_rss_bytes": 37998592
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9776782280000003,
+            "peak_rss_bytes": 37781504
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9821811000000006,
+            "peak_rss_bytes": 37888000
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9655940720000007,
+            "peak_rss_bytes": 37834752
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9957175049999996,
+            "peak_rss_bytes": 37900288
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9282981719999996,
+            "peak_rss_bytes": 37879808
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9080506209999999,
+            "peak_rss_bytes": 37670912
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 1.0511860580000008,
+            "peak_rss_bytes": 37740544
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 11135250,
+            "iterations": 707,
+            "rows": 735280,
+            "seconds": 0.9292962459999996,
+            "peak_rss_bytes": 38006784
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0012416880664780764,
+          "mad_ratio": 0.02685670884665962,
+          "peak_rss_bytes": 39002112,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0013731025502121649,
+          "mad_ratio": 0.025684410502388778,
+          "peak_rss_bytes": 37879808,
+          "rss_mad_ratio": 0.0025951557093425604,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.105835344062565,
+      "rust_native_rss_ratio": 0.9712245326612057,
+      "status": "regression"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "arrow",
+      "level": "atom",
+      "workers": 1,
+      "iterations": 449,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8674178809999996,
+            "peak_rss_bytes": 50499584
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8324217999999998,
+            "peak_rss_bytes": 50499584
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8415425549999994,
+            "peak_rss_bytes": 50524160
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8820877989999998,
+            "peak_rss_bytes": 51023872
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8135775280000004,
+            "peak_rss_bytes": 51310592
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8151249650000005,
+            "peak_rss_bytes": 51462144
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.9641435040000013,
+            "peak_rss_bytes": 50798592
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.9074211259999997,
+            "peak_rss_bytes": 50499584
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 1.0868076630000005,
+            "peak_rss_bytes": 51331072
+          }
+        ],
+        "rust": [
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8546560000000003,
+            "peak_rss_bytes": 46718976
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8232426379999997,
+            "peak_rss_bytes": 46727168
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.9024755320000003,
+            "peak_rss_bytes": 46620672
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8681796580000002,
+            "peak_rss_bytes": 46710784
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8170252130000009,
+            "peak_rss_bytes": 46637056
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.7979655350000001,
+            "peak_rss_bytes": 46637056
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.789528435,
+            "peak_rss_bytes": 46731264
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 0.8131352940000001,
+            "peak_rss_bytes": 46641152
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18474554,
+            "iterations": 449,
+            "rows": 7356416,
+            "seconds": 1.081313925999999,
+            "peak_rss_bytes": 46682112
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0019318883763919813,
+          "mad_ratio": 0.04611761629110362,
+          "peak_rss_bytes": 50798592,
+          "rss_mad_ratio": 0.005886147395581358,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0018335025345211575,
+          "mad_ratio": 0.03815808432410256,
+          "peak_rss_bytes": 46682112,
+          "rss_mad_ratio": 0.0009651662718259191,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 0.9490727088204908,
+      "rust_native_rss_ratio": 0.9189646831156265,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "arrow",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 148,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.7248663789999998,
+            "peak_rss_bytes": 51314688
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.772450322,
+            "peak_rss_bytes": 51597312
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.6703959169999997,
+            "peak_rss_bytes": 50499584
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.7150661659999996,
+            "peak_rss_bytes": 51261440
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.5651012049999999,
+            "peak_rss_bytes": 50548736
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.5646230450000003,
+            "peak_rss_bytes": 51597312
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.5823227059999997,
+            "peak_rss_bytes": 50495488
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.6360484150000001,
+            "peak_rss_bytes": 51326976
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.7384114179999995,
+            "peak_rss_bytes": 50528256
+          }
+        ],
+        "rust": [
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.674835747,
+            "peak_rss_bytes": 47742976
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.7821375779999999,
+            "peak_rss_bytes": 47742976
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.7566359119999998,
+            "peak_rss_bytes": 47665152
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.7115357939999996,
+            "peak_rss_bytes": 47681536
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.663814304,
+            "peak_rss_bytes": 47669248
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.6728745890000001,
+            "peak_rss_bytes": 47734784
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.6893556240000001,
+            "peak_rss_bytes": 47652864
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.651852248,
+            "peak_rss_bytes": 47665152
+          },
+          {
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 6089608,
+            "iterations": 148,
+            "rows": 606208,
+            "seconds": 0.8560297960000002,
+            "peak_rss_bytes": 47751168
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.00452970214189189,
+          "mad_ratio": 0.10145572082892015,
+          "peak_rss_bytes": 51261440,
+          "rss_mad_ratio": 0.006552137435077906,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.004657808270270271,
+          "mad_ratio": 0.03705100692701406,
+          "peak_rss_bytes": 47681536,
+          "rss_mad_ratio": 0.0006013229104028864,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.028281358103797,
+      "rust_native_rss_ratio": 0.9301638034358769,
+      "status": "noisy"
+    }
+  ]
+}

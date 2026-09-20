@@ -36,9 +36,9 @@ def build(env):
         "-p",
         "datafusion-bio-format-foldcomp",
     ]
-    result = subprocess.run(
-        command, cwd=ROOT, env=env, capture_output=True, text=True, check=True
-    )
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(result.stdout + result.stderr)
     binaries = {}
     for line in result.stdout.splitlines():
         item = json.loads(line)

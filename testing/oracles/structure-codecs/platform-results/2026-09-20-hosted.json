@@ -1,0 +1,208 @@
+{
+  "run_url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873",
+  "revision": "1be733afa79e9cd5af328d9e32ee603bc3eacea9",
+  "scope": "Standalone core probe; full job conclusions recorded separately",
+  "reports": [
+    {
+      "label": "macos-14",
+      "host": "macOS-14.8.9-arm64-arm-64bit",
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+        "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+        "compiler": "Apple clang version 15.0.0 (clang-1500.3.9.4)\nTarget: arm64-apple-darwin23.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_15.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+        "compiler_command": [
+          "c++"
+        ],
+        "flags": [
+          "-std=c++17",
+          "-O2",
+          "-D_USE_MATH_DEFINES",
+          "-include",
+          "exception"
+        ],
+        "platform": "macOS-14.8.9-arm64-arm-64bit",
+        "machine": "arm64"
+      },
+      "candidate_sha256": "0b6c550050785eb77f14a8d8aaa11d8e35cce4d4da04aa222ca560924579c6d0",
+      "reference_binary_sha256": "af5e507a1b661174da63ac4d48b3844cb06972cfd1e4334ff04a56df2b2bf48c",
+      "coordinate_ceiling": 0.0001,
+      "bfactor_ceiling": 0.0,
+      "failures": [],
+      "summary": {
+        "cases": 769,
+        "components": 159915,
+        "max_coordinate_error": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max_bfactor_error": 0.0,
+        "failures": 0
+      },
+      "full_report_sha256": "7d81c852e4f3d67f93d74447689c7e5031beb9a75a5fab75ffa61c27fc1759bc",
+      "case_records_sha256": "36ed3d551b69157e515ad0cddc7fb77b2cf4dd82f157c9ca3283e4ec4f6c4230",
+      "artifact": "codec-platform-macos-14"
+    },
+    {
+      "label": "macos-15-intel",
+      "host": "macOS-15.7.9-x86_64-i386-64bit",
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+        "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+        "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: x86_64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+        "compiler_command": [
+          "c++"
+        ],
+        "flags": [
+          "-std=c++17",
+          "-O2",
+          "-D_USE_MATH_DEFINES",
+          "-include",
+          "exception"
+        ],
+        "platform": "macOS-15.7.9-x86_64-i386-64bit",
+        "machine": "x86_64"
+      },
+      "candidate_sha256": "3234a91b4f7e7d22ce2ffe9d0aa540c4e5d152abf14a9e5af7ef025681b98ce9",
+      "reference_binary_sha256": "ac7d2a1bbf16277139b8aabbb644c48ef977d60e65b714d372c2a4d0797489d0",
+      "coordinate_ceiling": 0.0001,
+      "bfactor_ceiling": 0.0,
+      "failures": [],
+      "summary": {
+        "cases": 769,
+        "components": 159915,
+        "max_coordinate_error": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max_bfactor_error": 0.0,
+        "failures": 0
+      },
+      "full_report_sha256": "d1fe74975550b30699179e799d068007752f707530e771506d610e18eedce582",
+      "case_records_sha256": "9c6355b85f1bb558af6eb18b17180c737ddcbe5bb655c719eebac0f9d14d5a1d",
+      "artifact": "codec-platform-macos-15-intel"
+    },
+    {
+      "label": "ubuntu-22.04",
+      "host": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.35",
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+        "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+        "compiler": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0\nCopyright (C) 2021 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+        "compiler_command": [
+          "c++"
+        ],
+        "flags": [
+          "-std=c++17",
+          "-O2",
+          "-D_USE_MATH_DEFINES",
+          "-include",
+          "exception"
+        ],
+        "platform": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.35",
+        "machine": "x86_64"
+      },
+      "candidate_sha256": "f7521ade6781af2ad1b267100fb082ffdbf55d559ca051352375174ac33155fc",
+      "reference_binary_sha256": "e5c77c1c65b93ee6014db6d73565c8087a547a3f98c5157ce3d528cc768aa880",
+      "coordinate_ceiling": 0.0001,
+      "bfactor_ceiling": 0.0,
+      "failures": [],
+      "summary": {
+        "cases": 769,
+        "components": 159915,
+        "max_coordinate_error": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max_bfactor_error": 0.0,
+        "failures": 0
+      },
+      "full_report_sha256": "2a6318d48983b63b497f826c96c3a53e2d4807a301437755abaacc91440d6997",
+      "case_records_sha256": "8ec620963ba46e60d18bf02ff800565a8ebefa58f5fda869b78389bb5b723bdb",
+      "artifact": "codec-platform-ubuntu-22.04"
+    },
+    {
+      "label": "ubuntu-24.04-arm",
+      "host": "Linux-6.17.0-1022-azure-aarch64-with-glibc2.39",
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+        "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+        "compiler": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+        "compiler_command": [
+          "c++"
+        ],
+        "flags": [
+          "-std=c++17",
+          "-O2",
+          "-D_USE_MATH_DEFINES",
+          "-include",
+          "exception"
+        ],
+        "platform": "Linux-6.17.0-1022-azure-aarch64-with-glibc2.39",
+        "machine": "aarch64"
+      },
+      "candidate_sha256": "eae2af4ac81525e6ae70e955e6a0ee6ebc19ca0f4c6d2c63eb9aa6b70d1823c0",
+      "reference_binary_sha256": "1b5cbd666eef04d38b4304677b9a9bac8a46d06703fbe70eb2368717891d0c1b",
+      "coordinate_ceiling": 0.0001,
+      "bfactor_ceiling": 0.0,
+      "failures": [],
+      "summary": {
+        "cases": 769,
+        "components": 159915,
+        "max_coordinate_error": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max_bfactor_error": 0.0,
+        "failures": 0
+      },
+      "full_report_sha256": "9f8cb783c23fce7e2801c266f99211ba8f37686a4f3969d19089ce6864bd99ae",
+      "case_records_sha256": "bb599bda5c2fcfa42a2c1348a36422851178841eb028fbcb6c6ab2a713a20328",
+      "artifact": "codec-platform-ubuntu-24.04-arm"
+    },
+    {
+      "label": "windows-2022",
+      "host": "Windows-2022Server-10.0.20348-SP0",
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "d8e2781487ea4f5f2188a522eccea3f1d7c798d6e6c60866b537ffc2ef3e4b7e",
+        "driver_sha256": "76f6ef8a40ef47561a4ae2df7286ba868fa9704b99b99d93408895855db77969",
+        "compiler": "usage: cl [ option... ] filename... [ /link linkoption... ]\r\nMicrosoft (R) C/C++ Optimizing Compiler Version 19.44.35228 for x64\r\nCopyright (C) Microsoft Corporation.  All rights reserved.",
+        "compiler_command": [
+          "cl"
+        ],
+        "flags": [
+          "/nologo",
+          "/std:c++17",
+          "/O2",
+          "/EHsc",
+          "/D_USE_MATH_DEFINES",
+          "/FIexception"
+        ],
+        "platform": "Windows-2022Server-10.0.20348-SP0",
+        "machine": "AMD64"
+      },
+      "candidate_sha256": "77451583406d915d9eb0dfe93ab645d9300691a271fff433444c091a29b896ae",
+      "reference_binary_sha256": "1301c1ad7b5c7783205352f14bf5a6f46f906d2cccd582f7b0ad9a11406b8ecd",
+      "coordinate_ceiling": 0.0001,
+      "bfactor_ceiling": 0.0,
+      "failures": [],
+      "summary": {
+        "cases": 769,
+        "components": 159915,
+        "max_coordinate_error": 1.1444091796875e-05,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max_bfactor_error": 0.0,
+        "failures": 0
+      },
+      "full_report_sha256": "b9c6f21ad92bc9d475ec8e49c71663d89ed2b6c334036a9f65a3726660f73220",
+      "case_records_sha256": "fe627dc676936e2008486794b7aa0a5abe2df25bd80b437097af934fc4f17b20",
+      "artifact": "codec-platform-windows-2022"
+    }
+  ]
+}

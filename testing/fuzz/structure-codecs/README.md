@@ -45,6 +45,42 @@ that requirement. Longer campaigns can use `--target cif_document --seconds
 statistics and extend runs as necessary. No sustained budget is claimed here.
 The input bounds are harness limits, not replacements for provider limits.
 
+## Sustained CPU campaigns
+
+`campaign.py` executes already-built fuzz binaries directly. Its Unix child CPU
+samples surround only each fuzzer process; builds, Cargo startup, corpus hashing
+and report generation are excluded. It runs bounded segments until each shard's
+actual CPU budget is met, recording binary/source/lock hashes, seeds, execution
+counts, corpus changes and log hashes. A crash, absent statistics, missing shard,
+source/toolchain mismatch or insufficient measured budget fails verification.
+
+The portability workflow has an optional manual campaign mode. A zero CPU budget
+(the default) runs the normal platform/oracle/smoke jobs. For the planned sustained
+gate, eight independent shards each measure three CPU hours per decoder:
+
+```sh
+gh workflow run structures.yml --ref feat/rust-structure-codecs \
+  -f fuzz_cpu_seconds=10800 -f fuzz_shards=8
+```
+
+This schedules 16 Linux jobs and a final aggregation check. Each job has a six-hour
+wall timeout, with the same per-input 10-second / 2-GiB bounds as smoke fuzzing.
+The input limits are unchanged. Reports, crash artifacts and evolved corpora are
+retained for seven days; archive the accepted evidence before expiry. The final
+summary must show at least 86,400 **measured fuzzer CPU seconds per decoder**.
+Job startup, compilation and queue time do not satisfy that budget.
+
+For a local short runner check, first build with `cargo +nightly-2026-02-02 fuzz
+build --fuzz-dir testing/fuzz/structure-codecs cif_document`, then run:
+
+```sh
+python3 testing/fuzz/structure-codecs/campaign.py run \
+  --target cif_document --cpu-seconds 10 --output target/codec-campaign-check
+```
+
+Short runner checks are explicitly not sustained-budget evidence. Campaign mode
+does not run the full platform matrix again; retain that matrix's separate result.
+
 ## Separate-process comparison
 
 The optional probe uses the same source inclusion but no libFuzzer dependency:
@@ -76,5 +112,14 @@ The amd64 run on an ARM host is emulated. The image tag is a build recipe, while
 its recorded digest identifies the actual image used. Docker builds require
 network access to toolchain/package registries.
 
-Platform probes validate the decoder/parser/model core. Full DataFusion suites,
-Windows, installed wheels and the release performance gate remain separate checks.
+Add `--benchmark` to run the full nine-sample paired release protocol after the
+comparison. This installs GNU time in the image and writes `benchmark.json`
+beside the comparison report. It builds the actual DataFusion unit-test binaries
+with four Cargo build jobs; container timings are labeled as such and must be
+interpreted separately from native-host measurements.
+For a diagnostic subset, use `--datasets`, `--stages`, `--seconds` and a distinct
+`--report` filename. These subsets do not replace the complete acceptance run.
+
+Platform probes validate the decoder/parser/model core, now including the hosted
+Windows x64/MSVC target. Full DataFusion suites, installed wheels and the release
+performance gate remain separate checks.

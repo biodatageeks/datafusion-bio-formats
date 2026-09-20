@@ -5,10 +5,20 @@ on:
       - master
   pull_request:
   workflow_dispatch:
+    inputs:
+      fuzz_cpu_seconds:
+        description: "CPU seconds per decoder shard (0 runs normal portability checks)"
+        type: number
+        default: 0
+      fuzz_shards:
+        description: "Sustained campaign shards per decoder (1-8)"
+        type: number
+        default: 8
 permissions:
   contents: read
 jobs:
   native:
+    if: github.event_name != 'workflow_dispatch' || inputs.fuzz_cpu_seconds == 0
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +70,7 @@ jobs:
       - run: cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --release --lib
       - run: cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings
   oracles-and-sanitizers:
+    if: github.event_name != 'workflow_dispatch' || inputs.fuzz_cpu_seconds == 0
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +82,7 @@ jobs:
       - run: bash testing/native/check-codec.sh
 
   rust-fuzz-smoke:
+    if: github.event_name != 'workflow_dispatch' || inputs.fuzz_cpu_seconds == 0
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:
@@ -99,3 +111,88 @@ jobs:
             testing/fuzz/structure-codecs/logs
             testing/fuzz/structure-codecs/artifacts
             testing/fuzz/structure-codecs/corpus
+
+  campaign-matrix:
+    if: github.event_name == 'workflow_dispatch' && inputs.fuzz_cpu_seconds > 0
+    runs-on: ubuntu-22.04
+    outputs:
+      shards: ${{ steps.matrix.outputs.shards }}
+    steps:
+      - id: matrix
+        shell: python
+        env:
+          CPU_BUDGET: ${{ inputs.fuzz_cpu_seconds }}
+          SHARDS: ${{ inputs.fuzz_shards }}
+        run: |
+          import json, math, os
+          seconds = float(os.environ["CPU_BUDGET"])
+          shards = float(os.environ["SHARDS"])
+          assert math.isfinite(seconds) and 0 < seconds <= 14400
+          assert shards.is_integer() and 1 <= shards <= 8
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("shards=" + json.dumps(list(range(int(shards)))) + "\n")
+
+  rust-fuzz-campaign:
+    if: github.event_name == 'workflow_dispatch' && inputs.fuzz_cpu_seconds > 0
+    needs: campaign-matrix
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [cif_document, fcz_decode]
+        shard: ${{ fromJSON(needs.campaign-matrix.outputs.shards) }}
+    env:
+      FUZZ_TARGET: ${{ matrix.target }}
+      SHARD: ${{ matrix.shard }}
+      CPU_BUDGET: ${{ inputs.fuzz_cpu_seconds }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-02-02
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: testing/fuzz/structure-codecs
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Build before measuring fuzzer CPU
+        run: |
+          cargo +nightly-2026-02-02 fuzz build --fuzz-dir testing/fuzz/structure-codecs "$FUZZ_TARGET"
+          git diff --exit-code -- testing/fuzz/structure-codecs/Cargo.lock
+      - run: python testing/fuzz/structure-codecs/seed.py
+      - name: Run measured campaign shard
+        run: python testing/fuzz/structure-codecs/campaign.py run --target "$FUZZ_TARGET" --shard "$SHARD" --cpu-seconds "$CPU_BUDGET" --output testing/fuzz/structure-codecs/logs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codec-campaign-${{ matrix.target }}-${{ matrix.shard }}
+          retention-days: 7
+          path: |
+            testing/fuzz/structure-codecs/logs
+            testing/fuzz/structure-codecs/corpus/${{ matrix.target }}
+
+  campaign-summary:
+    if: github.event_name == 'workflow_dispatch' && inputs.fuzz_cpu_seconds > 0
+    needs: [campaign-matrix, rust-fuzz-campaign]
+    runs-on: ubuntu-22.04
+    env:
+      CPU_BUDGET: ${{ inputs.fuzz_cpu_seconds }}
+      SHARDS: ${{ inputs.fuzz_shards }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: codec-campaign-*
+          path: target/codec-campaign
+      - name: Require every shard and its measured CPU budget
+        run: python testing/fuzz/structure-codecs/campaign.py summarize --directory target/codec-campaign --shards "$SHARDS" --cpu-seconds "$CPU_BUDGET" --revision "$GITHUB_SHA" --output target/codec-campaign-summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codec-campaign-summary
+          path: target/codec-campaign-summary.json

@@ -4,6 +4,7 @@
 import argparse
 import json
 from pathlib import Path
+import shlex
 import subprocess
 
 HERE = Path(__file__).resolve().parent
@@ -17,7 +18,22 @@ def run(command, **kwargs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", choices=["arm64", "amd64"], default="arm64")
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="also run the full paired release benchmark",
+    )
+    parser.add_argument(
+        "--datasets", help="restrict the benchmark to diagnostic datasets"
+    )
+    parser.add_argument("--stages", default="raw,decode,arrow,pipeline,query")
+    parser.add_argument("--seconds", type=float, default=0.2)
+    parser.add_argument(
+        "--report", default="benchmark.json", help="benchmark report filename"
+    )
     args = parser.parse_args()
+    if Path(args.report).name != args.report or args.seconds <= 0:
+        parser.error("report must be a filename and seconds must be positive")
     image = f"polars-bio-codec-check:rust1.91-{args.arch}"
     output = ROOT / f"target/codec-linux-{args.arch}"
     output.mkdir(parents=True, exist_ok=True)
@@ -53,6 +69,22 @@ def main():
             f"python3 testing/oracles/structure-codecs/compare_candidate.py --candidate target/probe-build/release/codec_probe --output target/comparison.json --label linux-{args.arch}-container",
         ]
     )
+    if args.benchmark:
+        benchmark = [
+            "python3",
+            "testing/benchmarks/structure-codecs/run.py",
+            "--output",
+            f"target/{args.report}",
+            "--samples",
+            "9",
+            "--seconds",
+            str(args.seconds),
+            "--stages",
+            args.stages,
+        ]
+        if args.datasets:
+            benchmark.extend(["--datasets", args.datasets])
+        command += "\n" + shlex.join(benchmark)
     run(
         [
             "docker",
@@ -70,6 +102,8 @@ def main():
             str(ROOT),
             "--env",
             f"CARGO_TARGET_DIR={ROOT / 'target/probe-build'}",
+            "--env",
+            "CARGO_BUILD_JOBS=4",
             image,
             "sh",
             "-c",

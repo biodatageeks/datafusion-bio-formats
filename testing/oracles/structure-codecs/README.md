@@ -28,7 +28,7 @@ validates each payload before the unchecked upstream reader sees it. The build
 is cached under ignored `target/structure-codec-reference/`, keyed by source,
 driver, compiler, flags and platform. Each cache has `build.json` provenance.
 Set `CXX` to select a compiler; MSVC needs a developer shell and `CXX=cl`.
-The MSVC command path exists but has not been tested on Windows.
+The MSVC command path is exercised on the Windows x64 portability runner.
 
 `--check` regenerates observations in memory, compares them and their hashes,
 and never rewrites committed files. `capture.py --record` intentionally replaces
@@ -110,10 +110,12 @@ migration; they do not yet replace either production backend.
 The concrete interfaces, measured compatibility rules, layout and algorithm
 mapping are in [BASELINE.md](../../../openspec/changes/refactor-structure-codecs-to-rust/BASELINE.md).
 Long-chain and degenerate-frame regressions now supplement the small corpus.
-The [probe guide](../../fuzz/structure-codecs/README.md) documents the four-target
-comparison and CI setup; per-target coordinate and B-factor drift is zero locally.
-Sustained fuzz budgets, stable release performance/RSS, Windows/full hosted suites
-and consumer wheels remain open. Shared provider suites also
+The [probe guide](../../fuzz/structure-codecs/README.md) documents local comparison
+and CI setup. The [five hosted targets](platform-results/2026-09-20-hosted.json)
+pass all 769 cases: coordinate drift is zero on Linux/macOS, and the Windows
+maximum is 1.1444091796875e-5 angstrom, below the unchanged 1e-4 ceiling. B factors
+match exactly everywhere. Sustained fuzz budgets, stable release performance/RSS,
+full workspace checks and consumer wheels remain open. Shared provider suites also
 run in unit-test builds with candidate routing; ordinary integration builds keep
 the native backends until the cutover gate. The captured error strings document the reference; future Rust
 errors must retain useful source/block context but need not copy Gemmi wording.

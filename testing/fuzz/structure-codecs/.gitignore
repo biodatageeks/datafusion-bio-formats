@@ -2,3 +2,4 @@ corpus/
 artifacts/
 coverage/
 logs/
+__pycache__/

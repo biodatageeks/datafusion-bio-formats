@@ -47,3 +47,26 @@ lock hash, platform/toolchain, medians, noise estimates and local budget flags.
 `--datasets` and `--stages` restrict a diagnostic run; do not present those subsets
 as a full acceptance run. Optional binary paths avoid rebuilding; both are required.
 Run performance measurements without concurrent builds/fuzz campaigns.
+
+For a reproducible Linux ARM64 container run, including the source-identical
+array comparison first:
+
+```sh
+python3 testing/fuzz/structure-codecs/linux_check.py --arch arm64 --benchmark
+```
+
+This writes `target/codec-linux-arm64/benchmark.json` and image metadata. On an
+ARM host, `--arch amd64` uses emulation and cannot establish native x86 performance.
+
+The committed [macOS ARM64 observations](results/2026-09-20-macos-arm64.json)
+retain all 93 cases and samples. Seventeen cases meet the local budget; 76 are
+noisy/inconclusive, including one CIF pipeline case above the median RSS threshold.
+This run does not establish performance acceptance.
+
+The [Linux ARM64 container observations](results/2026-09-20-linux-arm64.json)
+contain 85 cases within budget, seven noisy cases, and one isolated
+residue-to-Arrow regression after decoding the mixed long chain. All 28 CIF cases
+meet the local budget. A longer [nine-sample, one-second diagnostic](results/2026-09-20-linux-arm64-arrow-diagnostic.json) repeats the
+Arrow finding at about 10.6% (versus 17.7% in the full run); the corresponding
+full pipeline/query cases remain within budget. Keep that isolated finding and
+the noisy cases open rather than treating them as a complete acceptance result.
