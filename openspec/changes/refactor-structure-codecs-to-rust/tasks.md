@@ -32,14 +32,14 @@ Production `Blocks`/provider routing and its full integration gate remain open.
 
 ## R2. Parse FCZ bytes safely
 
-- [ ] R2.1 Document header/section offsets, padding, bit widths, encoded counts and the supported version/layout from pinned upstream source and hand-built bytes.
-- [ ] R2.2 Implement checked little-endian readers, magic/length checks, finite-field validation, anchor/side-chain/OXT checks, and reconstructed atom limits before allocation.
-- [ ] R2.3 Decode packed backbone/residue fields, anchors, title, side-chain values and B factors; compare intermediate arrays to the pinned reference.
-- [ ] R2.4 Cover truncation at field boundaries, size overflow, inconsistent counts, unknown/UNK residue handling, invalid indices and exact section exhaustion.
+- [x] R2.1 Document header/section offsets, padding, bit widths, encoded counts and the supported version/layout from pinned upstream source and hand-built bytes.
+- [x] R2.2 Implement checked little-endian readers, magic/length checks, finite-field validation, anchor/side-chain/OXT checks, and reconstructed atom limits before allocation.
+- [x] R2.3 Decode packed backbone/residue fields, anchors, title, side-chain values and B factors; compare intermediate arrays to the pinned reference.
+- [x] R2.4 Cover truncation at field boundaries, size overflow, inconsistent counts, unknown/UNK residue handling, invalid indices and exact section exhaustion.
 
 ## R3. Reconstruct full Foldcomp output
 
-- [ ] R3.1 Port inverse discretization with baseline Float32 semantics and unit-test all decoded parameter arrays.
+- [x] R3.1 Port inverse discretization with baseline Float32 semantics and unit-test all decoded parameter arrays.
 - [ ] R3.2 Port backbone NeRF construction, anchor segmentation, reverse correction and segment joins; pass short/long/multi-anchor fixtures.
 - [ ] R3.3 Port residue tables and full side-chain reconstruction with attribution; preserve unknown-residue behavior, atom ordering, OXT, numbering, chain and B factors.
 - [ ] R3.4 Return the existing `NormalizedEntry` through `codec::decode`; retain common Float64 widening, normalization and residue/geometry behavior.

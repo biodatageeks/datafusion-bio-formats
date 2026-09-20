@@ -206,3 +206,12 @@ geometry, threshold-sensitive peptide links, sustained fuzz budgets,
 performance/RSS, full workspace and distribution matrix. Retain the design's
 existing coordinate/angle tolerances and proposed performance/fuzz thresholds.
 Do not remove either native backend while these migration gates remain open.
+
+### Measured inverse-discretization contraction (2026-09-20)
+
+The captured Apple Clang 16 arm64 reference emits FMADD for `code * factor +
+minimum`. Separate Float32 operations differ by two ULP for side-chain code 93.
+The Rust candidate therefore explicitly uses `mul_add`; all captured restored
+parameter arrays match bit-for-bit. The earlier warning about incidental fusion
+remains applicable: contraction decisions must follow measured reference
+behavior. This observation does not establish other-platform compatibility.

@@ -88,6 +88,29 @@ are tested. These short mutation runs are not the planned sustained fuzz gate.
 R1.1/R1.2 are implemented. R1.3/R1.4 retain open provider-routing/integration
 work; R1.5/R1.6 retain the production switch/removal gates.
 
+## 2026-09-20: Checked Rust FCZ reader and inverse discretization
+
+Implemented a test-only candidate with checked little-endian reads, validated
+section lengths/counts, finite fields, ordered anchors, residue codes, side-chain
+counts, OXT and reconstructed atom limits. The parsed entry borrows encoded
+sections and exposes validated records; no coordinate allocation precedes count
+validation. Upstream MIT attribution is retained beside the translated modules.
+
+All 275 small/1UBQ FCZ cases match the captured acceptance/error stages and exact
+intermediate parameter bits. The 24 database records match counts and anchors.
+Tests also cover every 1UBQ truncation, mutated headers, all byte-valued residue
+codes and reader cursor stability after failed reads.
+
+Compiler inspection corrected a numeric assumption: Clang arm64 emits FMADD for
+inverse discretization. Side-chain code 93 exposed a two-ULP difference with
+separate multiplication/addition. Explicit Rust `mul_add` reproduces the frozen
+bits for every captured parameter. This is a measured compatibility choice;
+no tolerance changed, and other-platform reference characterization remains open.
+
+Both crate suites now pass 40 tests. Clippy with all targets/features and denied
+warnings, formatting, the structure feature-off test, and Foldcomp with text
+formats also pass locally. R2.1–R2.4 and R3.1 are implemented.
+
 ## Remaining work
 
 R0.7 is open: platform reference characterization, release benchmark cases and
@@ -96,6 +119,6 @@ Both production backends still use the existing C++ implementations. The CIF
 candidate is implemented and tested but not switched on. No CI workflow,
 polars-bio pin, PR #461, published artifact or remote branch is changed.
 
-Next implementation units: the checked FCZ reader and full reconstruction,
+Next implementation unit: full FCZ reconstruction,
 followed by production integration after the acceptance gates pass.
 Do not equate local oracle success with full fuzz/performance/platform gates.

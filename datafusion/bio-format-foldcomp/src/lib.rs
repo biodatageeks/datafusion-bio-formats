@@ -1,6 +1,8 @@
 //! Local standalone FCZ and indexed Foldcomp database table providers.
 //! Selectors are resolved from metadata before payload decoding; empty means zero rows.
 pub mod codec;
+#[cfg(test)]
+mod fcz;
 mod manifest;
 use async_trait::async_trait;
 use datafusion::{
