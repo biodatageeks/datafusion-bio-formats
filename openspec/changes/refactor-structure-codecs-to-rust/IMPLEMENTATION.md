@@ -306,3 +306,35 @@ has been dispatched against `f96d1b0d82b709f161196c3b426f09bdc3d2b0f1`, requesti
 eight 10,800-CPU-second shards per decoder. It remains pending until every shard
 and the final measured-budget aggregation succeed. No sustained acceptance is
 claimed by dispatching it.
+
+## 2026-09-20: Installed consumer trial
+
+An isolated formats worktree routes ordinary builds to both Rust candidates;
+the main feature branch still uses the native production backends. The
+[reproducible routing patch and consumer harness](../../../testing/consumer/structure-codecs/README.md)
+retain that experiment without adding a public backend switch. Both comparison
+wheels use consumer `ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa`, identical locked
+dependencies, release settings and default mimalloc, with all 17 formats pins
+pointing together to the appropriate checkout. The local consumer feature branch
+is `feat/rust-structure-codecs`; its absolute path overrides are validation-only,
+not release pins. PR #461 and its original review checkout are unchanged.
+
+Both macOS ARM64 wheels pass **231 installed-wheel tests**, with four explicit
+skips: three need the external HMMER executable, and one opts into an 89 MB S3
+download. The eight files cover structures, Foldcomp, MSA and shared metadata,
+lazy execution and pushdown. Tests run with isolated Python outside the source
+checkout and import the installed package/extension. [Wheel, lock and test
+provenance](../../../testing/consumer/structure-codecs/results/2026-09-20-macos-arm64.json)
+records both results. The candidate still compiles native build inputs and has
+two unused inspection-helper warnings; this is runtime compatibility evidence,
+not the final package/artifact gate.
+
+A manual five-platform workflow now builds that isolated candidate and runs the
+same installed-wheel tests on compatible native runners. Its results remain
+pending. The new [paired consumer benchmark](../../../testing/benchmarks/structure-codecs/README.md)
+includes public Python collection, real local file/sidecar reads, full/subset/empty
+database selection and all output columns at 1/2/4/8 configured workers. It
+verifies matching Python/package versions and installed-extension/wheel hashes
+before measurement. Warm filesystem observations do not establish cold-storage
+or large external-database performance; actual I/O/decode counters are not
+exposed by the Python API.

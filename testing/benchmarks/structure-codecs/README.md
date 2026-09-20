@@ -70,3 +70,46 @@ meet the local budget. A longer [nine-sample, one-second diagnostic](results/202
 Arrow finding at about 10.6% (versus 17.7% in the full run); the corresponding
 full pipeline/query cases remain within budget. Keep that isolated finding and
 the noisy cases open rather than treating them as a complete acceptance result.
+
+## Installed Python wheels and local storage
+
+`consumer.py` compares separately installed native and Rust release wheels. Build
+both from the same polars-bio source/dependency lock, toolchain, default mimalloc
+allocator and release options; change only the formats backend routing. Install
+them into separate Python 3.12 environments with identical package versions.
+Pass each environment's executable without resolving its virtualenv symlink:
+
+```sh
+python3 testing/benchmarks/structure-codecs/consumer.py \
+  --native-python /path/to/native/.venv/bin/python \
+  --rust-python /path/to/rust/.venv/bin/python \
+  --native-wheel /path/to/native.whl --rust-wheel /path/to/rust.whl \
+  --output target/codec-consumer-benchmark.json --samples 9 --seconds 0.5
+```
+
+Every sample runs with isolated Python (`-I`) in a temporary directory outside
+the source checkout. Before measurement, the driver verifies identical Python
+and installed package versions, and matches each installed extension's hash to
+its supplied wheel. The public eager reader constructs the scan, reads real
+files/sidecars, selects database entries and materializes every output column.
+Inputs are the seven frozen core workloads plus empty database selection; atom
+and residue levels use 1/2/4/8 DataFusion partitions and Polars/Rayon threads.
+Single-source inputs may not occupy every configured worker.
+
+Nine fresh-process sample pairs alternate backend order. Native calibration
+sets an equal iteration count targeting 0.5 seconds, with two untimed full
+reads per process. Each pair must match schemas, row counts and sorted seeded
+row hashes covering every column. This additional hash check requires bitwise
+output agreement on the measured host; it does not replace tolerance-aware
+cross-platform oracle checks. Samples retain time, process peak RSS, first
+collection latency, iterations, package provenance and input/wheel hashes.
+
+The same 10% median time/RSS and 5% MAD/median noise thresholds apply. RSS includes
+imports and warmups but is captured before untimed output hashing. The recorded
+first collection excludes imports and is neither first-batch latency nor a cold
+filesystem measurement. Filesystem caches are warm; no cache flush is attempted.
+Actual bytes read and decoder calls are not exposed by this Python API; input
+sizes are provenance, not I/O counters. Provider tests separately enforce zero/K
+decodes. Large external databases, cold storage and other wheel platforms remain
+separate acceptance work. Use `--datasets`/`--workers` only for clearly labeled
+diagnostics and run benchmarks after local builds/fuzzing have stopped.

@@ -1,0 +1,63 @@
+{
+  "platform": "macOS ARM64",
+  "consumer_revision": "ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa",
+  "native_formats_revision": "a4af2ef",
+  "rust_formats_revision": "0fcf32d5fe3ad1730aa2826829bbade0ba9eff01",
+  "candidate_routing_base": "f96d1b0d82b709f161196c3b426f09bdc3d2b0f1",
+  "routing_patch_sha256": "2bbeeac1cb918926982a4d4d51f37eff3d300cbb5b6ef137c0f03a5095bdf08b",
+  "build": "maturin 1.13.3; Rust 1.91.0; release; default mimalloc; Python 3.12.2; all 17 formats use one path-pinned checkout; locked dependency graph unchanged except formats Git sources removed",
+  "scope": "runtime trial; native build inputs remain; not final C++-free package acceptance",
+  "backends": {
+    "native": {
+      "wheel": "polars_bio-0.35.1-cp310-abi3-macosx_11_0_arm64.whl",
+      "wheel_sha256": "c3eddbef4b5321cc4e3aa09e5e89ef9faa18e967648a1c9a263e5b6967ee88fe",
+      "passed": 231,
+      "skips": [
+        {
+          "test": "test_live_esl_alistat_counts[PF00001.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_live_esl_alistat_counts[RF00001.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_live_esl_alistat_counts[multi.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+          "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+        }
+      ],
+      "junit_sha256": "4b15a4d7b03d86c7b515d6dfaf727a72c7b919ee045d8362b985e2f2073d37a1",
+      "build_log_sha256": "7f8ffd4e654400402df32959f8359e2529cbf8e55415ee810f1ffd89bb2f9258"
+    },
+    "rust": {
+      "wheel": "polars_bio-0.35.1-cp310-abi3-macosx_11_0_arm64.whl",
+      "wheel_sha256": "5815dc955d3bb7e7e0647f850c1e9271209071a2b01fa3f41425ab3782c36891",
+      "passed": 231,
+      "skips": [
+        {
+          "test": "test_live_esl_alistat_counts[PF00001.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_live_esl_alistat_counts[RF00001.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_live_esl_alistat_counts[multi.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+          "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+        }
+      ],
+      "junit_sha256": "fa834c42b7d39b5b7fb2e2afe53ed323bf55c8aa99f133e16f6c58dd4e8d54e9",
+      "build_log_sha256": "17392cd0cae278f5ec5600f85469baefdc161fb7e74115ed471a524ba9989e89"
+    }
+  },
+  "consumer_lock_sha256": "de87226e10a0389c7f87895a4b725544df472ebc8416d06e2558d6a7c29b4189"
+}

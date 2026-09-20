@@ -1,0 +1,67 @@
+name: Rust structure codecs installed wheels
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  installed-wheel:
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04-arm, macos-14, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: formats
+      - uses: actions/checkout@v4
+        with:
+          repository: biodatageeks/polars-bio
+          ref: ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa
+          path: consumer
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.91.0"
+          # The trial retains two unused test-inspection helpers. Denied warnings
+          # remain a final-cutover gate; no release workflow is changed here.
+          rustflags: ${{ runner.os == 'macOS' && '-C debuginfo=0 -C link-arg=-undefined -C link-arg=dynamic_lookup' || '-C debuginfo=0' }}
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: consumer -> ../target
+          key: codec-consumer-candidate
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libbz2-dev liblzma-dev libcurl4-openssl-dev zlib1g-dev libdeflate-dev
+      - name: Install frozen Python requirements
+        run: python -m pip install -r formats/testing/consumer/structure-codecs/requirements.txt
+      - name: Prepare isolated Rust runtime candidate
+        run: python formats/testing/consumer/structure-codecs/validate.py prepare --consumer consumer --formats formats --candidate --output evidence
+      - name: Build release wheel with locked Rust dependencies
+        working-directory: consumer
+        run: python -m maturin build --locked --release --out ../wheels --interpreter python
+      - name: Install exact wheel
+        shell: python
+        run: |
+          import hashlib, json, pathlib, subprocess, sys
+          wheels = list(pathlib.Path("wheels").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "--force-reinstall", str(wheels[0])], check=True)
+          pathlib.Path("evidence/wheel.json").write_text(json.dumps({"file": wheels[0].name, "sha256": hashlib.sha256(wheels[0].read_bytes()).hexdigest()}, indent=2) + "\n")
+      - name: Run installed-wheel consumer regressions outside checkout
+        run: python -I formats/testing/consumer/structure-codecs/validate.py test --consumer consumer --output evidence
+      - name: Retain trial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-consumer-${{ matrix.os }}
+          path: evidence
+          retention-days: 14
