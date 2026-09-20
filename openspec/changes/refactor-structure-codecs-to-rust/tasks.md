@@ -56,7 +56,7 @@ sustained fuzz, release-performance or wheel acceptance.
 ## R4. Harden and validate both production paths
 
 - [ ] R4.1 Add parser/decoder property tests, bounded fuzz targets and minimized regressions; record fuzz budgets, seeds, executions and findings.
-- [ ] R4.2 Run the full small offline corpus and external-oracle verification; investigate numerical drift without relaxing established tolerances implicitly.
+- [x] R4.2 Run the full small offline corpus and external-oracle verification; investigate numerical drift without relaxing established tolerances implicitly.
 - [ ] R4.3 Compare release performance and peak RSS on representative parse/decode, Arrow/residue, query and subset workloads using equal work and frozen inputs.
 - [ ] R4.4 Validate Linux x86_64/arm64, macOS x86_64/arm64 and Windows x64, plus structure/Foldcomp feature combinations and all required workspace checks.
 - [ ] R4.5 Audit package/build artifacts for removed C++ sources, build invocations and bridge symbols; retain external reference execution separately from production.

@@ -1,0 +1,1315 @@
+{
+  "conclusion": "success",
+  "headSha": "1be733afa79e9cd5af328d9e32ee603bc3eacea9",
+  "jobs": [
+    {
+      "completedAt": "2026-09-20T15:28:04Z",
+      "conclusion": "success",
+      "databaseId": 106097890871,
+      "name": "native (macos-14)",
+      "startedAt": "2026-09-20T15:02:19Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:02:22Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:02:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:29Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:02:22Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:06Z",
+          "conclusion": "success",
+          "name": "Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 3,
+          "startedAt": "2026-09-20T15:02:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:27Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-09-20T15:03:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:28Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 5,
+          "startedAt": "2026-09-20T15:03:27Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:28Z",
+          "conclusion": "skipped",
+          "name": "Run ilammy/msvc-dev-cmd@v1",
+          "number": 6,
+          "startedAt": "2026-09-20T15:03:28Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:36Z",
+          "conclusion": "success",
+          "name": "Build source-identical Rust candidate",
+          "number": 7,
+          "startedAt": "2026-09-20T15:03:28Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:05Z",
+          "conclusion": "success",
+          "name": "Compare candidate with pinned native process",
+          "number": 8,
+          "startedAt": "2026-09-20T15:03:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:06Z",
+          "conclusion": "success",
+          "name": "Retain platform observations",
+          "number": 9,
+          "startedAt": "2026-09-20T15:04:05Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:05:50Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp",
+          "number": 10,
+          "startedAt": "2026-09-20T15:04:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:05:53Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure --no-default-features",
+          "number": 11,
+          "startedAt": "2026-09-20T15:05:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:07:12Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp",
+          "number": 12,
+          "startedAt": "2026-09-20T15:05:53Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:08:47Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp --features text-formats",
+          "number": 13,
+          "startedAt": "2026-09-20T15:07:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:27:44Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --release --lib",
+          "number": 14,
+          "startedAt": "2026-09-20T15:08:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:27:58Z",
+          "conclusion": "success",
+          "name": "Run cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings",
+          "number": 15,
+          "startedAt": "2026-09-20T15:27:44Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:27:59Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 27,
+          "startedAt": "2026-09-20T15:27:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:27:59Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 28,
+          "startedAt": "2026-09-20T15:27:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:27:59Z",
+          "conclusion": "success",
+          "name": "Post Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 29,
+          "startedAt": "2026-09-20T15:27:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:28:00Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 30,
+          "startedAt": "2026-09-20T15:27:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:28:02Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 31,
+          "startedAt": "2026-09-20T15:28:00Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097890871"
+    },
+    {
+      "completedAt": "2026-09-20T15:22:10Z",
+      "conclusion": "success",
+      "databaseId": 106097890952,
+      "name": "native (ubuntu-24.04-arm)",
+      "startedAt": "2026-09-20T15:02:16Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:02:18Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:02:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:24Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:02:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:32Z",
+          "conclusion": "success",
+          "name": "Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 3,
+          "startedAt": "2026-09-20T15:02:24Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:32Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-09-20T15:02:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:32Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 5,
+          "startedAt": "2026-09-20T15:02:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:32Z",
+          "conclusion": "skipped",
+          "name": "Run ilammy/msvc-dev-cmd@v1",
+          "number": 6,
+          "startedAt": "2026-09-20T15:02:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:36Z",
+          "conclusion": "success",
+          "name": "Build source-identical Rust candidate",
+          "number": 7,
+          "startedAt": "2026-09-20T15:02:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:58Z",
+          "conclusion": "success",
+          "name": "Compare candidate with pinned native process",
+          "number": 8,
+          "startedAt": "2026-09-20T15:02:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:59Z",
+          "conclusion": "success",
+          "name": "Retain platform observations",
+          "number": 9,
+          "startedAt": "2026-09-20T15:02:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:06:57Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp",
+          "number": 10,
+          "startedAt": "2026-09-20T15:02:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:07:03Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure --no-default-features",
+          "number": 11,
+          "startedAt": "2026-09-20T15:06:57Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:08:15Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp",
+          "number": 12,
+          "startedAt": "2026-09-20T15:07:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:09:45Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp --features text-formats",
+          "number": 13,
+          "startedAt": "2026-09-20T15:08:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:20:38Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --release --lib",
+          "number": 14,
+          "startedAt": "2026-09-20T15:09:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:21:55Z",
+          "conclusion": "success",
+          "name": "Run cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings",
+          "number": 15,
+          "startedAt": "2026-09-20T15:20:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:21:55Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 27,
+          "startedAt": "2026-09-20T15:21:55Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:22:06Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 28,
+          "startedAt": "2026-09-20T15:21:55Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:22:08Z",
+          "conclusion": "success",
+          "name": "Post Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 29,
+          "startedAt": "2026-09-20T15:22:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:22:09Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 30,
+          "startedAt": "2026-09-20T15:22:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:22:09Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 31,
+          "startedAt": "2026-09-20T15:22:09Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097890952"
+    },
+    {
+      "completedAt": "2026-09-20T15:03:41Z",
+      "conclusion": "success",
+      "databaseId": 106097890975,
+      "name": "rust-fuzz-smoke (selected_range)",
+      "startedAt": "2026-09-20T15:02:13Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:02:16Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:02:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:17Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:02:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:27Z",
+          "conclusion": "success",
+          "name": "Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 3,
+          "startedAt": "2026-09-20T15:02:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:27Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 4,
+          "startedAt": "2026-09-20T15:02:27Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:33Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 5,
+          "startedAt": "2026-09-20T15:02:27Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:33Z",
+          "conclusion": "success",
+          "name": "Run cargo install cargo-fuzz --version 0.13.2 --locked",
+          "number": 6,
+          "startedAt": "2026-09-20T15:02:33Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:33Z",
+          "conclusion": "success",
+          "name": "Run python testing/fuzz/structure-codecs/seed.py",
+          "number": 7,
+          "startedAt": "2026-09-20T15:02:33Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:38Z",
+          "conclusion": "success",
+          "name": "Run python testing/fuzz/structure-codecs/run.py --toolchain nightly-2026-02-02 --seconds 60 --target selected_range",
+          "number": 8,
+          "startedAt": "2026-09-20T15:02:33Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:39Z",
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@v4",
+          "number": 9,
+          "startedAt": "2026-09-20T15:03:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:39Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 15,
+          "startedAt": "2026-09-20T15:03:39Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 16,
+          "startedAt": "2026-09-20T15:03:39Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Post Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 17,
+          "startedAt": "2026-09-20T15:03:40Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 18,
+          "startedAt": "2026-09-20T15:03:40Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 19,
+          "startedAt": "2026-09-20T15:03:40Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097890975"
+    },
+    {
+      "completedAt": "2026-09-20T15:46:12Z",
+      "conclusion": "success",
+      "databaseId": 106097890982,
+      "name": "native (windows-2022)",
+      "startedAt": "2026-09-20T15:02:14Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:02:18Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:02:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:29Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:02:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:49Z",
+          "conclusion": "success",
+          "name": "Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 3,
+          "startedAt": "2026-09-20T15:02:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:24Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-09-20T15:02:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:24Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 5,
+          "startedAt": "2026-09-20T15:03:24Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:31Z",
+          "conclusion": "success",
+          "name": "Run ilammy/msvc-dev-cmd@v1",
+          "number": 6,
+          "startedAt": "2026-09-20T15:03:24Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Build source-identical Rust candidate",
+          "number": 7,
+          "startedAt": "2026-09-20T15:03:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:28Z",
+          "conclusion": "success",
+          "name": "Compare candidate with pinned native process",
+          "number": 8,
+          "startedAt": "2026-09-20T15:03:40Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:29Z",
+          "conclusion": "success",
+          "name": "Retain platform observations",
+          "number": 9,
+          "startedAt": "2026-09-20T15:04:28Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:10:51Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp",
+          "number": 10,
+          "startedAt": "2026-09-20T15:04:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:10:56Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure --no-default-features",
+          "number": 11,
+          "startedAt": "2026-09-20T15:10:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:13:30Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp",
+          "number": 12,
+          "startedAt": "2026-09-20T15:10:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:16:32Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp --features text-formats",
+          "number": 13,
+          "startedAt": "2026-09-20T15:13:30Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:44:29Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --release --lib",
+          "number": 14,
+          "startedAt": "2026-09-20T15:16:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:46:07Z",
+          "conclusion": "success",
+          "name": "Run cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings",
+          "number": 15,
+          "startedAt": "2026-09-20T15:44:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:46:07Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 27,
+          "startedAt": "2026-09-20T15:46:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:46:07Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 28,
+          "startedAt": "2026-09-20T15:46:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:46:08Z",
+          "conclusion": "success",
+          "name": "Post Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 29,
+          "startedAt": "2026-09-20T15:46:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:46:10Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 30,
+          "startedAt": "2026-09-20T15:46:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:46:10Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 31,
+          "startedAt": "2026-09-20T15:46:10Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097890982"
+    },
+    {
+      "completedAt": "2026-09-20T15:49:56Z",
+      "conclusion": "success",
+      "databaseId": 106097890992,
+      "name": "native (macos-15-intel)",
+      "startedAt": "2026-09-20T15:02:14Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:02:19Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:02:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:31Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:02:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:59Z",
+          "conclusion": "success",
+          "name": "Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 3,
+          "startedAt": "2026-09-20T15:02:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:00Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-09-20T15:02:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:01Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 5,
+          "startedAt": "2026-09-20T15:03:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:01Z",
+          "conclusion": "skipped",
+          "name": "Run ilammy/msvc-dev-cmd@v1",
+          "number": 6,
+          "startedAt": "2026-09-20T15:03:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:13Z",
+          "conclusion": "success",
+          "name": "Build source-identical Rust candidate",
+          "number": 7,
+          "startedAt": "2026-09-20T15:03:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:13Z",
+          "conclusion": "success",
+          "name": "Compare candidate with pinned native process",
+          "number": 8,
+          "startedAt": "2026-09-20T15:03:13Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:14Z",
+          "conclusion": "success",
+          "name": "Retain platform observations",
+          "number": 9,
+          "startedAt": "2026-09-20T15:04:13Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:13:36Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp",
+          "number": 10,
+          "startedAt": "2026-09-20T15:04:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:13:42Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure --no-default-features",
+          "number": 11,
+          "startedAt": "2026-09-20T15:13:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:16:23Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp",
+          "number": 12,
+          "startedAt": "2026-09-20T15:13:42Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:19:47Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp --features text-formats",
+          "number": 13,
+          "startedAt": "2026-09-20T15:16:23Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:44:26Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --release --lib",
+          "number": 14,
+          "startedAt": "2026-09-20T15:19:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:47:25Z",
+          "conclusion": "success",
+          "name": "Run cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings",
+          "number": 15,
+          "startedAt": "2026-09-20T15:44:26Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:47:26Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 27,
+          "startedAt": "2026-09-20T15:47:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:48:39Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 28,
+          "startedAt": "2026-09-20T15:47:26Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:49:51Z",
+          "conclusion": "success",
+          "name": "Post Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 29,
+          "startedAt": "2026-09-20T15:48:39Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:49:52Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 30,
+          "startedAt": "2026-09-20T15:49:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:49:53Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 31,
+          "startedAt": "2026-09-20T15:49:52Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097890992"
+    },
+    {
+      "completedAt": "2026-09-20T15:03:44Z",
+      "conclusion": "success",
+      "databaseId": 106097890994,
+      "name": "rust-fuzz-smoke (cif_document)",
+      "startedAt": "2026-09-20T15:02:14Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:02:17Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:02:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:18Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:02:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:29Z",
+          "conclusion": "success",
+          "name": "Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 3,
+          "startedAt": "2026-09-20T15:02:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:29Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 4,
+          "startedAt": "2026-09-20T15:02:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:31Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 5,
+          "startedAt": "2026-09-20T15:02:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:32Z",
+          "conclusion": "success",
+          "name": "Run cargo install cargo-fuzz --version 0.13.2 --locked",
+          "number": 6,
+          "startedAt": "2026-09-20T15:02:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:32Z",
+          "conclusion": "success",
+          "name": "Run python testing/fuzz/structure-codecs/seed.py",
+          "number": 7,
+          "startedAt": "2026-09-20T15:02:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:37Z",
+          "conclusion": "success",
+          "name": "Run python testing/fuzz/structure-codecs/run.py --toolchain nightly-2026-02-02 --seconds 60 --target cif_document",
+          "number": 8,
+          "startedAt": "2026-09-20T15:02:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:39Z",
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@v4",
+          "number": 9,
+          "startedAt": "2026-09-20T15:03:37Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:39Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 15,
+          "startedAt": "2026-09-20T15:03:39Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 16,
+          "startedAt": "2026-09-20T15:03:39Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Post Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 17,
+          "startedAt": "2026-09-20T15:03:40Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 18,
+          "startedAt": "2026-09-20T15:03:40Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:40Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 19,
+          "startedAt": "2026-09-20T15:03:40Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097890994"
+    },
+    {
+      "completedAt": "2026-09-20T15:04:08Z",
+      "conclusion": "success",
+      "databaseId": 106097891003,
+      "name": "oracles-and-sanitizers",
+      "startedAt": "2026-09-20T15:02:13Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:02:14Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:02:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:15Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:02:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:16Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 3,
+          "startedAt": "2026-09-20T15:02:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:22Z",
+          "conclusion": "success",
+          "name": "Run python -m pip install -r testing/oracles/structure/requirements.txt",
+          "number": 4,
+          "startedAt": "2026-09-20T15:02:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:23Z",
+          "conclusion": "success",
+          "name": "Run python testing/oracles/structure/generate.py --check",
+          "number": 5,
+          "startedAt": "2026-09-20T15:02:22Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:06Z",
+          "conclusion": "success",
+          "name": "Run bash testing/native/check-codec.sh",
+          "number": 6,
+          "startedAt": "2026-09-20T15:02:23Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:06Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 11,
+          "startedAt": "2026-09-20T15:04:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:06Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 12,
+          "startedAt": "2026-09-20T15:04:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:06Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 13,
+          "startedAt": "2026-09-20T15:04:06Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097891003"
+    },
+    {
+      "completedAt": "2026-09-20T15:03:48Z",
+      "conclusion": "success",
+      "databaseId": 106097891013,
+      "name": "rust-fuzz-smoke (fcz_decode)",
+      "startedAt": "2026-09-20T15:02:14Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:02:16Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:02:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:18Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:02:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:36Z",
+          "conclusion": "success",
+          "name": "Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 3,
+          "startedAt": "2026-09-20T15:02:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:36Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 4,
+          "startedAt": "2026-09-20T15:02:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:37Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 5,
+          "startedAt": "2026-09-20T15:02:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:38Z",
+          "conclusion": "success",
+          "name": "Run cargo install cargo-fuzz --version 0.13.2 --locked",
+          "number": 6,
+          "startedAt": "2026-09-20T15:02:37Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:02:38Z",
+          "conclusion": "success",
+          "name": "Run python testing/fuzz/structure-codecs/seed.py",
+          "number": 7,
+          "startedAt": "2026-09-20T15:02:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:43Z",
+          "conclusion": "success",
+          "name": "Run python testing/fuzz/structure-codecs/run.py --toolchain nightly-2026-02-02 --seconds 60 --target fcz_decode",
+          "number": 8,
+          "startedAt": "2026-09-20T15:02:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:45Z",
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@v4",
+          "number": 9,
+          "startedAt": "2026-09-20T15:03:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:45Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 15,
+          "startedAt": "2026-09-20T15:03:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:45Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 16,
+          "startedAt": "2026-09-20T15:03:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:46Z",
+          "conclusion": "success",
+          "name": "Post Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 17,
+          "startedAt": "2026-09-20T15:03:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:46Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 18,
+          "startedAt": "2026-09-20T15:03:46Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:46Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 19,
+          "startedAt": "2026-09-20T15:03:46Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097891013"
+    },
+    {
+      "completedAt": "2026-09-20T15:23:52Z",
+      "conclusion": "success",
+      "databaseId": 106097891024,
+      "name": "native (ubuntu-22.04)",
+      "startedAt": "2026-09-20T15:03:42Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-20T15:03:45Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-20T15:03:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:03:51Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-20T15:03:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:02Z",
+          "conclusion": "success",
+          "name": "Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 3,
+          "startedAt": "2026-09-20T15:03:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:10Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-09-20T15:04:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:11Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 5,
+          "startedAt": "2026-09-20T15:04:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:11Z",
+          "conclusion": "skipped",
+          "name": "Run ilammy/msvc-dev-cmd@v1",
+          "number": 6,
+          "startedAt": "2026-09-20T15:04:11Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:16Z",
+          "conclusion": "success",
+          "name": "Build source-identical Rust candidate",
+          "number": 7,
+          "startedAt": "2026-09-20T15:04:11Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:43Z",
+          "conclusion": "success",
+          "name": "Compare candidate with pinned native process",
+          "number": 8,
+          "startedAt": "2026-09-20T15:04:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:04:43Z",
+          "conclusion": "success",
+          "name": "Retain platform observations",
+          "number": 9,
+          "startedAt": "2026-09-20T15:04:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:06:18Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp",
+          "number": 10,
+          "startedAt": "2026-09-20T15:04:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:06:21Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure --no-default-features",
+          "number": 11,
+          "startedAt": "2026-09-20T15:06:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:07:38Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp",
+          "number": 12,
+          "startedAt": "2026-09-20T15:06:21Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:09:10Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-foldcomp --features text-formats",
+          "number": 13,
+          "startedAt": "2026-09-20T15:07:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:23:42Z",
+          "conclusion": "success",
+          "name": "Run cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --release --lib",
+          "number": 14,
+          "startedAt": "2026-09-20T15:09:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:23:50Z",
+          "conclusion": "success",
+          "name": "Run cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings",
+          "number": 15,
+          "startedAt": "2026-09-20T15:23:42Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:23:50Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 27,
+          "startedAt": "2026-09-20T15:23:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:23:50Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 28,
+          "startedAt": "2026-09-20T15:23:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:23:50Z",
+          "conclusion": "success",
+          "name": "Post Run actions-rust-lang/setup-rust-toolchain@v1",
+          "number": 29,
+          "startedAt": "2026-09-20T15:23:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:23:51Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 30,
+          "startedAt": "2026-09-20T15:23:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-20T15:23:51Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 31,
+          "startedAt": "2026-09-20T15:23:51Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873/job/106097891024"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873"
+}

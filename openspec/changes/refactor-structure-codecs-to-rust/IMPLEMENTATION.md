@@ -264,9 +264,12 @@ Commit `1be733a` pins only Foldcomp's test profile to optimization level 2 while
 retaining debug assertions and overflow checks. Production dev/release profiles
 and the Rust numerical implementation are unchanged. The temporary override is
 documented in [BASELINE.md](BASELINE.md) and must be removed with the native
-test adapter. The corrected Linux x86_64/ARM64 full jobs pass, including release,
-provider, feature and Clippy checks; other hosted jobs were still finishing when
-this checkpoint was recorded.
+test adapter. The corrected [five-platform workflow](https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873)
+passes all nine jobs, including Linux x86_64/ARM64, macOS x86_64/ARM64 and Windows
+x64 debug/provider/feature/release/Clippy checks, the independent oracle/native
+sanitizer job, and all three Rust fuzz smoke jobs. The
+[complete job record](../../../testing/oracles/structure-codecs/platform-results/2026-09-20-ci.json)
+is retained with the tested revision.
 
 [Linux ARM64 release samples](../../../testing/benchmarks/structure-codecs/results/2026-09-20-linux-arm64.json)
 cover the same 93 cases and nine-sample protocol. Eighty-five cases are within the
