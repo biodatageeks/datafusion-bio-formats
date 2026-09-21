@@ -401,3 +401,21 @@ The Docker daemon on the local host is unresponsive, so hosted native runners
 provide the follow-up environment without restarting the user's containers.
 The existing full workspace CI also has a manual dispatch entry point for its
 required bcftools/PLINK/BGEN oracle environment. Dispatch is not test acceptance.
+
+The follow-up tooling at `fe9c879b87e71b61f39c16d8cccd4f607b3f08eb` passes the
+40 release library tests (two benchmark workers remain intentionally ignored),
+targeted all-target/all-feature Clippy with denied warnings, formatting, Ruff
+and strict OpenSpec validation. Actionlint 1.7.7 passes with only its outdated
+`macos-15-intel` label warning explicitly excluded; that existing label has
+already run successfully in both platform matrices. A short local harness
+check exercises every new diagnostic stage and confirms identical normalized
+value hashes; its three short samples are functional checks, not acceptance data.
+
+The [hosted ARM64 release/profile run](https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35562624982)
+and [full required workspace CI](https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35562624401)
+are running at that revision. The fuzz retry remains at its original pinned
+revision; the decoder sources have not changed. A pre-cutover `cargo package
+--list` audit finds 188 structure package files, including 161 native files,
+and 56 Foldcomp files, including 29 native files. Both native build scripts
+remain; the translated Rust decoder's Foldcomp MIT notice is included. This
+confirms why runtime wheel success does not yet close the removal/artifact gate.
