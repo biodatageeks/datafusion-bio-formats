@@ -4,7 +4,8 @@
 //! it never folds case, rewrites `.`/`-`, pads rows or validates the alignment,
 //! because A3M (and dotless A2M, which is what Easel itself writes) is ragged by
 //! design. The only format-specific behaviour is skipping `#` lines that hh-suite
-//! may emit before the first `>` record.
+//! may emit before the first `>` record. An optional literal comment prefix
+//! additionally skips matching lines anywhere in the file.
 
 use crate::storage::{LineSource, open_lines, read_line};
 use async_stream::try_stream;
@@ -73,6 +74,7 @@ pub struct FastaLikeTableProvider {
     flavor: MsaFlavor,
     schema: SchemaRef,
     object_storage_options: Option<ObjectStorageOptions>,
+    comment_prefix: Option<String>,
 }
 
 impl FastaLikeTableProvider {
@@ -87,7 +89,28 @@ impl FastaLikeTableProvider {
             flavor,
             schema: fasta_like_schema(),
             object_storage_options,
+            comment_prefix: None,
         })
+    }
+
+    /// Skip lines starting with this literal prefix anywhere in the input.
+    ///
+    /// `None` preserves verbatim sequence lines. Leading `#` headers are still
+    /// skipped independently. The prefix may contain multiple UTF-8 characters;
+    /// matching starts at the first byte, without trimming or inline stripping.
+    pub fn with_comment_prefix(
+        mut self,
+        comment_prefix: Option<String>,
+    ) -> datafusion::common::Result<Self> {
+        if let Some(prefix) = &comment_prefix
+            && (prefix.is_empty() || prefix.contains(['\r', '\n']))
+        {
+            return Err(DataFusionError::Plan(
+                "comment_prefix must be non-empty and contain no line breaks".into(),
+            ));
+        }
+        self.comment_prefix = comment_prefix;
+        Ok(self)
     }
 }
 
@@ -140,6 +163,7 @@ impl TableProvider for FastaLikeTableProvider {
             projection: projection.cloned(),
             limit,
             object_storage_options: self.object_storage_options.clone(),
+            comment_prefix: self.comment_prefix.clone(),
         }))
     }
 }
@@ -152,6 +176,7 @@ pub struct FastaLikeExec {
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
     object_storage_options: Option<ObjectStorageOptions>,
+    comment_prefix: Option<String>,
     cache: Arc<PlanProperties>,
 }
 
@@ -223,6 +248,7 @@ impl ExecutionPlan for FastaLikeExec {
             self.limit,
             batch_size,
             self.object_storage_options.clone().unwrap_or_default(),
+            self.comment_prefix.clone(),
         );
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
@@ -326,6 +352,7 @@ async fn record_batches(
     limit: Option<usize>,
     batch_size: usize,
     opts: ObjectStorageOptions,
+    comment_prefix: Option<String>,
 ) -> datafusion::common::Result<SendableRecordBatchStream> {
     // A pushed-down `LIMIT 0` asks for nothing, so do not open the input at all.
     if limit == Some(0) {
@@ -356,6 +383,10 @@ async fn record_batches(
                 .await
                 .map_err(|e| DataFusionError::Execution(format!("{file_path}:{line_no}: read error: {e}")))?;
             let at_eof = !more;
+            if !at_eof && comment_prefix.as_ref().is_some_and(|prefix| line.starts_with(prefix.as_bytes())) {
+                line_no += 1;
+                continue;
+            }
             let starts_record = !at_eof && line.first() == Some(&b'>');
 
             if at_eof || starts_record {

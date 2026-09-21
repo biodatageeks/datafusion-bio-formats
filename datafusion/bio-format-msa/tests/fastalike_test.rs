@@ -38,6 +38,10 @@ fn strings(batches: &[RecordBatch], col: &str) -> Vec<Option<String>> {
                 let a = arr.as_string::<i64>();
                 out.extend((0..a.len()).map(|i| a.is_valid(i).then(|| a.value(i).to_string())));
             }
+            DataType::Utf8View => {
+                let a = arr.as_string_view();
+                out.extend((0..a.len()).map(|i| a.is_valid(i).then(|| a.value(i).to_string())));
+            }
             other => panic!("unexpected type for {col}: {other}"),
         }
     }
@@ -243,4 +247,136 @@ async fn non_record_line_before_first_header_is_an_error() {
         err.contains('>'),
         "error should mention the expected '>': {err}"
     );
+}
+
+async fn scan_text_with_comments(
+    text: &str,
+    flavor: MsaFlavor,
+    prefix: Option<&str>,
+    sql: &str,
+) -> datafusion::common::Result<Vec<RecordBatch>> {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), text).unwrap();
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_batch_size(1));
+    let provider = FastaLikeTableProvider::new(file.path().to_string_lossy().into(), flavor, None)?
+        .with_comment_prefix(prefix.map(str::to_owned))?;
+    ctx.register_table("t", Arc::new(provider))?;
+    ctx.sql(sql).await?.collect().await
+}
+
+#[tokio::test]
+async fn comment_prefix_skips_preamble_wrapped_inter_record_and_trailing_comments() {
+    let text = "#A3M#\r\n; provenance\r\n>query desc;kept\r\nACd\r\n; wrapped\r\ne.-\r\n; between\r\n>hit\r\nA--\r\n; trailing without newline";
+    for flavor in [MsaFlavor::A2m, MsaFlavor::A3m] {
+        let batches = scan_text_with_comments(text, flavor, Some(";"), "SELECT * FROM t")
+            .await
+            .unwrap();
+        assert_eq!(
+            strings(&batches, "name"),
+            vec![Some("query".into()), Some("hit".into())]
+        );
+        assert_eq!(
+            strings(&batches, "description"),
+            vec![Some("desc;kept".into()), None]
+        );
+        assert_eq!(
+            strings(&batches, "sequence"),
+            vec![Some("ACde.-".into()), Some("A--".into())]
+        );
+        let projected =
+            scan_text_with_comments(text, flavor, Some(";"), "SELECT name FROM t LIMIT 1")
+                .await
+                .unwrap();
+        assert_eq!(strings(&projected, "name"), vec![Some("query".into())]);
+        let count = scan_text_with_comments(
+            text,
+            flavor,
+            Some(";"),
+            "SELECT CAST(count(*) AS VARCHAR) AS n FROM t",
+        )
+        .await
+        .unwrap();
+        assert_eq!(strings(&count, "n"), vec![Some("2".into())]);
+    }
+}
+
+#[tokio::test]
+async fn comment_prefix_is_literal_and_matches_only_the_start_of_a_line() {
+    for prefix in [";;", "注:"] {
+        let text =
+            format!("{prefix} preamble\n>query\nAC{prefix}GT\n {prefix}kept\n{prefix}discarded\n");
+        let batches =
+            scan_text_with_comments(&text, MsaFlavor::A3m, Some(prefix), "SELECT * FROM t")
+                .await
+                .unwrap();
+        assert_eq!(
+            strings(&batches, "sequence"),
+            vec![Some(format!("AC{prefix}GT {prefix}kept"))]
+        );
+    }
+}
+
+#[tokio::test]
+async fn absent_comment_prefix_preserves_existing_hash_and_sequence_rules() {
+    for flavor in [MsaFlavor::A2m, MsaFlavor::A3m] {
+        let batches = scan_text_with_comments(
+            "#A3M#\n>query\nAC\n;kept\n#kept\n",
+            flavor,
+            None,
+            "SELECT * FROM t",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            strings(&batches, "sequence"),
+            vec![Some("AC;kept#kept".into())]
+        );
+        for sql in ["SELECT * FROM t", "SELECT count(*) FROM t"] {
+            let error = scan_text_with_comments(";unsupported\n>query\nAC\n", flavor, None, sql)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("expected a '>' record header"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn comment_only_files_are_empty_and_skipped_lines_count_toward_error_locations() {
+    let batches = scan_text_with_comments(
+        ";first\n;last",
+        MsaFlavor::A3m,
+        Some(";"),
+        "SELECT * FROM t",
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows(&batches), 0);
+    let error = scan_text_with_comments(
+        ";first\n;second\ninvalid\n",
+        MsaFlavor::A3m,
+        Some(";"),
+        "SELECT * FROM t",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(":3: expected a '>' record header")
+    );
+}
+
+#[test]
+fn comment_prefix_rejects_empty_strings_and_line_breaks() {
+    for prefix in ["", "\n", ";\r", ";\n"] {
+        let error = FastaLikeTableProvider::new("unused.a3m".into(), MsaFlavor::A3m, None)
+            .unwrap()
+            .with_comment_prefix(Some(prefix.into()))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("comment_prefix must be non-empty and contain no line breaks")
+        );
+    }
 }

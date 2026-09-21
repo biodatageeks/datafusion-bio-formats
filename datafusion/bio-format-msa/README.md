@@ -32,3 +32,15 @@ available via `read_stockholm_annotations`, one row per line, repeats preserved.
 Local uncompressed multi-alignment files are split across DataFusion
 `target_partitions` on `//` boundaries; a single-alignment file is one
 partition and holds that alignment in memory while it is parsed.
+
+## Custom A2M / A3M comments
+
+Use `FastaLikeTableProvider::new(path, flavor, storage_options)?`
+`.with_comment_prefix(Some(";".into()))?` for files with semicolon comments,
+including OpenProteinSet-derived alignments. Matching lines are skipped anywhere
+in the file, before parsing records. Matching is literal and starts at the first
+byte: whitespace is not trimmed and inline occurrences are retained. Multi-character
+UTF-8 prefixes are supported; empty strings and line breaks are rejected.
+
+The default is `None`, preserving verbatim sequence lines. Leading `#` headers
+are skipped independently of this option. Stockholm parsing is unchanged.

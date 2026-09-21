@@ -72,3 +72,9 @@
 - [ ] 6.1 Writing A2M/A3M and Stockholm.
 - [ ] 6.2 A3M → A2M insert expansion.
 - [ ] 6.3 `#=GC` exposed as per-column columns.
+
+## 7. Comment-prefix follow-up (polars-bio#459)
+
+- [x] 7.1 Add per-provider optional literal comment prefixes while preserving leading `#` headers and the default verbatim behavior.
+- [x] 7.2 Cover wrapped/inter-record comments, projections/counts/limits, CRLF, trailing comments, Unicode prefixes, invalid prefixes, and source line numbers.
+- [x] 7.3 Document matching semantics; validate the spec, formatting, 57 integration tests, the doc-test, and crate Clippy with warnings denied.
