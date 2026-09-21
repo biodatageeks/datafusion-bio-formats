@@ -345,12 +345,19 @@ fn reconstruction_rejects_degenerate_and_overflowing_geometry_without_panicking(
         [[0.0f32; 3]; 3],
         [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
     ] {
-        let mut data = original.to_vec();
-        for (i, value) in points.into_iter().flatten().enumerate() {
-            data[coordinates + i * 4..coordinates + i * 4 + 4]
-                .copy_from_slice(&value.to_le_bytes());
+        for (anchor_index, anchor) in encoded.anchors().iter().enumerate() {
+            let mut data = original.to_vec();
+            for (i, value) in points.into_iter().flatten().enumerate() {
+                let offset = coordinates + anchor_index * 36 + i * 4;
+                data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            let error = super::decode(&data, &options).err().unwrap().to_string();
+            assert!(error.contains(&format!("anchor {anchor_index}")), "{error}");
+            assert!(
+                error.contains(&format!("residue index {}", anchor.residue)),
+                "{error}"
+            );
         }
-        assert!(super::decode(&data, &options).is_err());
     }
     for offset in [
         28,

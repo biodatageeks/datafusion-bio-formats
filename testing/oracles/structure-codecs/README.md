@@ -61,7 +61,14 @@ check does not replace the migration's numerical-tolerance/platform gates.
   generating `src/fcz/tables.rs`; `--check` also requires rustfmt on PATH.
 - `foldcomp_stress.py` / `fcz-stress/`: 1,040 mixed residues with 18 anchors and
   a 4,096-residue single segment. The independent packer constructs the inputs;
-  the pinned process freezes full-output/atom hashes and small summaries.
+  the pinned process freezes full-output hashes separately for the five measured
+  OS/architecture/toolchain profiles. Input bytes/counts/anchors and canonical
+  source hashes remain shared; CRLF checkouts use LF-normalized source hashes.
+  Each profile retains its compiler, raw archive/driver hashes and capture
+  provenance. Unknown profiles fail explicitly instead of using another host's
+  output. `--record` updates the current profile; other profiles are retained only
+  while their shared inputs/reference source remain unchanged. The checker runs
+  on all five portability jobs.
   Explicit Rust release tests compare complete arrays, normalized identities and
   residue geometry with the external legacy process.
 - `check_contract.py`: compares handwritten nulls, packed integers, residue

@@ -114,7 +114,10 @@ impl<'a> Tokenizer<'a> {
             (b"stop_".as_slice(), Kind::Stop),
             (b"save_".as_slice(), Kind::EndFrame),
         ] {
-            if (kind != Kind::EndFrame || self.in_frame) && self.keyword(word) {
+            let frame_name = kind == Kind::EndFrame
+                && !self.in_frame
+                && self.data.get(start + word.len()) == Some(&b'#');
+            if !frame_name && self.keyword(word) {
                 self.position += word.len();
                 return Ok(Some(Token {
                     kind,
@@ -177,14 +180,6 @@ impl<'a> Tokenizer<'a> {
                     .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data_"))
                 {
                     Kind::Data
-                } else if word.eq_ignore_ascii_case(b"global_") {
-                    Kind::Global
-                } else if word.eq_ignore_ascii_case(b"loop_") {
-                    Kind::Loop
-                } else if word.eq_ignore_ascii_case(b"stop_") {
-                    Kind::Stop
-                } else if word.eq_ignore_ascii_case(b"save_") {
-                    Kind::EndFrame
                 } else if word
                     .get(..5)
                     .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"save_"))

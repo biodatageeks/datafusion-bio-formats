@@ -1,16 +1,30 @@
 //! Forward/reverse anchor reconstruction adapted from Foldcomp (MIT).
 //! See LICENSE-FOLDCOMP. EncodedEntry has already checked every section/count.
 use super::{
-    geometry::{Point, angle, blend, place},
+    geometry::{Point, angle, blend, finite_frame, place},
     header::EncodedEntry,
 };
+use datafusion::common::Result;
+use datafusion_bio_format_structure::error;
 
 const C_TO_N: f32 = 1.3311;
 const N_TO_CA: f32 = 1.4581;
 const PRO_N_TO_CA: f32 = 1.353;
 const CA_TO_C: f32 = 1.5281;
 
-pub(super) fn reconstruct(entry: &EncodedEntry<'_>) -> Vec<Point> {
+pub(super) fn reconstruct(entry: &EncodedEntry<'_>) -> Result<Vec<Point>> {
+    for (index, anchor) in entry.anchors().iter().enumerate() {
+        // The initial seed is used forward; subsequent anchors seed reverse
+        // reconstruction. Check the actual orientation's rounded arithmetic.
+        let [n, ca, c] = anchor.coordinates;
+        let seed = if index == 0 { [n, ca, c] } else { [c, ca, n] };
+        if !finite_frame(seed) {
+            return Err(error(format!(
+                "FCZ anchor {index} at residue index {} cannot define a finite reconstruction frame",
+                anchor.residue
+            )));
+        }
+    }
     let records = entry.backbone();
     let parameters = records
         .iter()
@@ -57,6 +71,8 @@ pub(super) fn reconstruct(entry: &EncodedEntry<'_>) -> Vec<Point> {
         reverse.extend(anchors[1].coordinates.iter().rev().copied());
         for index in 0..count - 3 {
             let n = reverse.len();
+            // Legacy's reverse pass deliberately uses N_TO_CA even for proline;
+            // only the forward pass selects PRO_N_TO_CA from the prior residue.
             let length = [C_TO_N, CA_TO_C, N_TO_CA][index % 3];
             let next = place(
                 [reverse[n - 3], reverse[n - 2], reverse[n - 1]],
@@ -73,5 +89,5 @@ pub(super) fn reconstruct(entry: &EncodedEntry<'_>) -> Vec<Point> {
         let final_segment = segment + 2 == entry.anchors().len();
         output.extend_from_slice(&forward[..if final_segment { count } else { count - 3 }]);
     }
-    output
+    Ok(output)
 }

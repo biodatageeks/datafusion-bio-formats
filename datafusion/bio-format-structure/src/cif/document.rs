@@ -239,6 +239,16 @@ impl<'a> Parser<'a> {
                     frame = None;
                     self.tokenizer.set_in_frame(false);
                 }
+                Kind::Frame => {
+                    return Err(self
+                        .tokenizer
+                        .error_at(token.span.start, "save frames may not be nested"));
+                }
+                Kind::EndFrame => {
+                    return Err(self
+                        .tokenizer
+                        .error_at(token.span.start, "save_ outside a save frame"));
+                }
                 _ => {
                     return Err(self
                         .tokenizer

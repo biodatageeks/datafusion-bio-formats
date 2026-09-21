@@ -18,7 +18,7 @@ pub(crate) fn decode(data: &[u8], options: &StructureOptions) -> Result<Normaliz
         atoms: Vec::with_capacity(encoded.reconstructed_atoms()),
         ..Default::default()
     };
-    let backbone = backbone::reconstruct(&encoded);
+    let backbone = backbone::reconstruct(&encoded)?;
     let mut side_offset = 0;
     for (index, record) in encoded.backbone().iter().enumerate() {
         let table = TABLES[usize::from(record.residue.code()).min(20)];
@@ -92,7 +92,9 @@ fn append(
     b_factor: f32,
 ) -> Result<()> {
     if !position.into_iter().all(f32::is_finite) || !b_factor.is_finite() {
-        return Err(error("non-finite FCZ output"));
+        return Err(error(format!(
+            "non-finite FCZ output at residue {residue_id} ({residue}), atom {name}"
+        )));
     }
     let index = entry.atoms.len();
     entry.atoms.push(Atom {

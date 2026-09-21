@@ -55,6 +55,12 @@ jobs:
         if: runner.os == 'Windows'
       - name: Build source-identical Rust candidate
         run: cargo build --locked --manifest-path testing/fuzz/structure-codecs/Cargo.toml --release --no-default-features --features probe --bin codec_probe
+      - name: Verify stress fixtures against the host arithmetic profile
+        env:
+          CXX: ${{ runner.os == 'Windows' && 'cl' || 'c++' }}
+        run: |
+          python testing/oracles/structure-codecs/test_foldcomp_stress.py
+          python testing/oracles/structure-codecs/foldcomp_stress.py --check
       - name: Compare Rust codecs with pinned external process
         shell: python
         env:

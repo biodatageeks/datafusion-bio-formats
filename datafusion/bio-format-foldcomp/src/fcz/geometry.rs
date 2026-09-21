@@ -27,6 +27,13 @@ fn unit(a: Point) -> Point {
     a.map(|v| v / length)
 }
 
+/// Check an anchor using the same rounded basis arithmetic as `place`.
+pub(super) fn finite_frame([a, b, c]: [Point; 3]) -> bool {
+    let bc = unit(subtract(c, b));
+    let normal = unit(cross(subtract(b, a), bc));
+    bc.into_iter().chain(normal).all(f32::is_finite)
+}
+
 pub(super) fn place(previous: [Point; 3], length: f32, bond: f32, torsion: f32) -> Point {
     let [a, b, c] = previous;
     let ab = subtract(b, a);
@@ -57,8 +64,13 @@ pub(super) fn angle(a: Point, b: Point, c: Point) -> f32 {
     let cb = subtract(c, b);
     let inner = dot(ab, cb);
     let squared_sizes = dot(ab, ab) * dot(cb, cb);
-    // Unqualified sqrt/acos resolve to double in the GNU C++ headers; Apple's
-    // headers provide Float32 overloads. Preserve the intermediate narrowing.
+    // Measured legacy profiles: GNU/Linux GCC promotes sqrt/acos to double;
+    // Apple Clang and Windows x64/MSVC select Float32 overloads. All five CI
+    // targets compare against their own optimized native reference, including
+    // Windows (<= 1e-4 coordinate error). Preserve intermediate narrowing.
+    // This OS mapping describes those tested toolchains, not every C++ library:
+    // musl, MinGW and BSD are uncharacterized and need separate reference checks
+    // before claiming legacy numerical compatibility on those targets.
     let radians = if cfg!(target_os = "linux") {
         let cosine = (f64::from(inner) / f64::from(squared_sizes).sqrt()) as f32;
         f64::from(cosine).acos()

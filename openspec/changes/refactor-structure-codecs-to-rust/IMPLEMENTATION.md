@@ -500,3 +500,30 @@ Raw reports and that profiling failure are retained without weakening gates.
 The final sustained FCZ shard is still retrying its lost hosted runner at the
 original revision/seed. Performance, sustained fuzz, final platform delivery
 and release acceptance remain open after the explicitly requested cutover.
+
+## 2026-09-21: PR #255 review corrections
+
+The stress-fixture checker now selects full-output hashes by the five measured
+OS/architecture/toolchain profiles, using the retained native observations from
+run `35518305873`. Fixture bytes and structural summaries remain exact. Source
+fingerprints normalize CRLF to LF, while per-profile provenance preserves the
+raw native archive/driver/compiler observations. Unknown toolchains/profiles
+fail explicitly; recording one profile cannot retain other profiles against
+changed shared source/fixtures. Five regression tests cover profile selection,
+cross-platform hash rejection, changed inputs, unknown profiles and line endings.
+All five platform jobs now execute the checker itself.
+
+FCZ reconstruction validates each anchor in the orientation actually consumed
+by the forward/reverse pass and reports the anchor/residue index for a degenerate
+frame. Later non-finite output identifies the residue and atom. Valid geometry
+keeps the existing arithmetic and tolerances. Comments explicitly describe the
+tested Windows/MSVC profile, uncharacterized toolchains and the legacy reverse
+pass's proline behavior. CIF reserved keywords have one recognition path;
+save-frame errors now distinguish nesting and an unmatched closing marker.
+
+Local validation passes 63 reader tests (six explicit ignores), all four
+external-reference release tests, five stress-checker regressions, the native
+macOS ARM64 stress check, targeted all-target/all-feature Clippy, formatting and
+Ruff. The standalone comparison still passes 769 cases / 159,915 coordinate
+components with zero coordinate/B-factor drift. These checks do not close the
+previously documented performance or sustained-fuzz acceptance findings.

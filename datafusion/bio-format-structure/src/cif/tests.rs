@@ -64,6 +64,28 @@ fn external_reference_atom_and_residue_batches_match_retained_mapping_exactly() 
 }
 
 #[test]
+fn save_frame_keywords_keep_comment_boundaries_and_context() {
+    let document = Document::parse(
+        b"data_x\nsave_#name\n_a hidden\nsave_#end\n_b visible\nloop_#items\n_c\n1\nstop_#end\n",
+    )
+    .unwrap();
+    let block = document.block(0).unwrap();
+    assert!(!block.columns.contains_key("_a"));
+    assert_eq!(block.columns["_b"], [Some("visible")]);
+    assert_eq!(block.columns["_c"], [Some("1")]);
+    for (data, expected) in [
+        (b"data_x\nsave_\n".as_slice(), "save_ outside a save frame"),
+        (
+            b"data_x\nsave_outer\nsave_inner\n".as_slice(),
+            "save frames may not be nested",
+        ),
+    ] {
+        let error = Document::parse(data).err().unwrap().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn syntax_mutations_and_truncations_never_panic() {
     let source = b"data_x\n_a 'quoted'\n_b\n;text\r\nmore\n;\nloop_\n_c\n_d\n1 2 . '?'\nsave_f\n_e hidden\nsave_\n";
     let inspect = |data: &[u8]| {
