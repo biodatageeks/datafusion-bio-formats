@@ -1,0 +1,896 @@
+{
+  "platform": "Linux-6.17.0-1022-azure-aarch64-with-glibc2.39",
+  "machine": "aarch64",
+  "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)",
+  "revision": "fe9c879b87e71b61f39c16d8cccd4f607b3f08eb",
+  "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "cargo_lock_sha256": "e611e975c17f24aac37416f5c368c9165e895364cb13d99d3a6cefbe0fe3577d",
+  "binaries": {
+    "structure": {
+      "sha256": "e8c44ade95ea742be0163e7243a98248d3d72b389eb5819db242a639a23c0e5b",
+      "path": "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/release/deps/datafusion_bio_format_structure-654ecd7e1fe2b449"
+    },
+    "foldcomp": {
+      "sha256": "682f37d65465ea6b700a57c1919ba54144786cf46683e36fedf9730856fe3cff",
+      "path": "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/release/deps/datafusion_bio_format_foldcomp-df698936402da375"
+    }
+  },
+  "samples": 9,
+  "calibration_seconds": 2.0,
+  "method": "alternating paired fresh processes; 2 untimed warmups; preloaded input; no cache flush; query uses shared EntrySource harness; complete materialization",
+  "threshold_ratio": 1.1,
+  "noise_limit_mad_ratio": 0.05,
+  "diagnostic_layout_inspection": false,
+  "inputs": {
+    "fcz_long_mixed": [
+      {
+        "file": "long_mixed.fcz",
+        "offset": 0,
+        "length": 15750,
+        "sha256": "e7c7cfdfd260d9df548aa3dda3749d926c3efb9abbf1220ea55d5c8409947d74"
+      }
+    ],
+    "fcz_long_segment": [
+      {
+        "file": "long_segment.fcz",
+        "offset": 0,
+        "length": 41146,
+        "sha256": "f3e6a7ae5e904b40a386f863a30966bd790423679067759cdef5caa278f45992"
+      }
+    ]
+  },
+  "results": [
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "arrow",
+      "level": "atom",
+      "workers": 1,
+      "iterations": 1644,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9351028289999974,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9998071559999995,
+            "peak_rss_bytes": 40513536
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9828610819999999,
+            "peak_rss_bytes": 40521728
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9299203529999993,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 2.0587722640000035,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9926600509999983,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9514404460000008,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.943231364999995,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.924719349999998,
+            "peak_rss_bytes": 40525824
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 2.001001779999996,
+            "peak_rss_bytes": 39321600
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9812862909999978,
+            "peak_rss_bytes": 39329792
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9311933450000003,
+            "peak_rss_bytes": 39337984
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9438255229999988,
+            "peak_rss_bytes": 39337984
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9282290780000004,
+            "peak_rss_bytes": 39329792
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.990299771000003,
+            "peak_rss_bytes": 39337984
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9199002890000014,
+            "peak_rss_bytes": 39337984
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.987236780999999,
+            "peak_rss_bytes": 39337984
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 25893000,
+            "iterations": 1644,
+            "rows": 14278140,
+            "seconds": 1.9853943930000006,
+            "peak_rss_bytes": 39325696
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0011870075705596112,
+          "mad_ratio": 0.013693011259849017,
+          "peak_rss_bytes": 40525824,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0012051619774939158,
+          "mad_ratio": 0.009950853185405908,
+          "peak_rss_bytes": 39337984,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.015294263814801,
+      "rust_native_rss_ratio": 0.9706893066504952,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "arrow",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 917,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.914378946999999,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.9213807700000005,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.9297869979999989,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.9276979919999995,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.9231719499999993,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 2.247746841,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.9483869080000014,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.943708623999999,
+            "peak_rss_bytes": 40525824
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.9322509260000011,
+            "peak_rss_bytes": 40521728
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 2.2513045980000004,
+            "peak_rss_bytes": 39723008
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.923730964000002,
+            "peak_rss_bytes": 39550976
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 2.0574676810000008,
+            "peak_rss_bytes": 39677952
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 2.095232419000001,
+            "peak_rss_bytes": 39677952
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 1.9448260759999993,
+            "peak_rss_bytes": 39366656
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 2.2864921689999984,
+            "peak_rss_bytes": 39624704
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 2.1670314100000003,
+            "peak_rss_bytes": 39677952
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 2.301494427,
+            "peak_rss_bytes": 39481344
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14442750,
+            "iterations": 917,
+            "rows": 953680,
+            "seconds": 2.3101056320000004,
+            "peak_rss_bytes": 39403520
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0021044569225736084,
+          "mad_ratio": 0.004356039297969428,
+          "peak_rss_bytes": 40525824,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.002363174929116685,
+          "mad_ratio": 0.055126454766061,
+          "peak_rss_bytes": 39624704,
+          "rss_mad_ratio": 0.0018606574322927434,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.1229381337141755,
+      "rust_native_rss_ratio": 0.9777643015969274,
+      "status": "noisy"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "arrow",
+      "level": "atom",
+      "workers": 1,
+      "iterations": 844,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.8347288999999987,
+            "peak_rss_bytes": 52117504
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9109967129999985,
+            "peak_rss_bytes": 52117504
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9014541999999988,
+            "peak_rss_bytes": 52101120
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.8577466359999986,
+            "peak_rss_bytes": 52109312
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.8779396599999991,
+            "peak_rss_bytes": 52117504
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9179051779999996,
+            "peak_rss_bytes": 52109312
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9039596989999987,
+            "peak_rss_bytes": 52113408
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9424542420000013,
+            "peak_rss_bytes": 52117504
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9085110640000025,
+            "peak_rss_bytes": 52117504
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9020166640000002,
+            "peak_rss_bytes": 48177152
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9350121119999995,
+            "peak_rss_bytes": 48181248
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.896430217,
+            "peak_rss_bytes": 48189440
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.911312944999999,
+            "peak_rss_bytes": 48189440
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9008732500000007,
+            "peak_rss_bytes": 48189440
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.8949940339999969,
+            "peak_rss_bytes": 48164864
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.8795255199999996,
+            "peak_rss_bytes": 48189440
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.8547916430000007,
+            "peak_rss_bytes": 48181248
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 34727224,
+            "iterations": 844,
+            "rows": 13828096,
+            "seconds": 1.9101586199999996,
+            "peak_rss_bytes": 48189440
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0022558764206161122,
+          "mad_ratio": 0.007324461230626462,
+          "peak_rss_bytes": 52117504,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0022522194905213277,
+          "mad_ratio": 0.004884791766099672,
+          "peak_rss_bytes": 48189440,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 0.9983789315490138,
+      "rust_native_rss_ratio": 0.9246306193021062,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "arrow",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 346,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 1.9442944970000005,
+            "peak_rss_bytes": 52121600
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.3711306090000006,
+            "peak_rss_bytes": 52121600
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 1.9462640010000007,
+            "peak_rss_bytes": 52121600
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.349268483999999,
+            "peak_rss_bytes": 52121600
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 1.9551458819999992,
+            "peak_rss_bytes": 52121600
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 1.934567429999999,
+            "peak_rss_bytes": 52121600
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 1.9735115459999995,
+            "peak_rss_bytes": 52121600
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 1.9424953419999995,
+            "peak_rss_bytes": 52109312
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.347015632999999,
+            "peak_rss_bytes": 52121600
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.3656154549999995,
+            "peak_rss_bytes": 49209344
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.378326834999999,
+            "peak_rss_bytes": 49209344
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.341412052999999,
+            "peak_rss_bytes": 49209344
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.3733118179999995,
+            "peak_rss_bytes": 49209344
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.367461127999999,
+            "peak_rss_bytes": 49213440
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.352243939999999,
+            "peak_rss_bytes": 49209344
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.3965951379999995,
+            "peak_rss_bytes": 49209344
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.374422589999999,
+            "peak_rss_bytes": 49274880
+          },
+          {
+            "allocation_layout": null,
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 14236516,
+            "iterations": 346,
+            "rows": 1417216,
+            "seconds": 2.3247491370000004,
+            "peak_rss_bytes": 49209344
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.005650710641618495,
+          "mad_ratio": 0.00939350059199329,
+          "peak_rss_bytes": 52121600,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.006842373202312136,
+          "mad_ratio": 0.004589603128638805,
+          "peak_rss_bytes": 49209344,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.2108872027381536,
+      "rust_native_rss_ratio": 0.9441257367387034,
+      "status": "regression"
+    }
+  ]
+}

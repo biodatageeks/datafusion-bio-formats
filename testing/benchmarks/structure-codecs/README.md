@@ -171,3 +171,25 @@ totals within their displayed precision against exact fixture/index lengths.
 Payload bytes include FCZ database terminators and exclude sidecar reads. These
 are logical counters, not physical I/O measurements. Extension hashes tie the
 untimed counter checks to the measured wheel installations.
+
+
+The [2026-09-21 hosted ARM64 Arrow follow-up](results/2026-09-21-hosted-arrow.json)
+uses nine pairs with two-second calibration at pre-cutover revision `fe9c879`.
+The mixed-chain residue case is noisy (time ratio 1.123); the long single-segment
+residue case is stable above budget (1.211). Atom cases remain within budget.
+The separate [layout/clone diagnostic](results/2026-09-21-hosted-layout.json)
+has matching normalized value hashes and all ratios near parity (at most 1.016).
+Inspection changes setup allocations, so this demonstrates sensitivity to setup
+and does not invalidate the uninstrumented finding or establish its precise cause.
+[CPU sampling was unavailable](results/2026-09-21-hosted-profile-status.json):
+the runner rejected software-clock sampling with a PMU sampling/interrupt error.
+No profiler-based explanation or performance acceptance is claimed.
+
+The matching [93-case uninstrumented release run](results/2026-09-21-hosted-release.json)
+completes with 89 cases within budget, two regressions and two noisy cases.
+The isolated mixed-chain and single-segment residue-to-Arrow time ratios are
+1.194 and 1.187; their RSS ratios are 0.975 and 0.944. Complete residue pipelines
+for those same inputs remain faster (time ratios 0.733 and 0.672). The two noisy
+cases are single-segment atom queries at four/eight workers. These pre-cutover
+measurements retain their original acceptance status after production cutover;
+workflow success alone does not close the performance gate.

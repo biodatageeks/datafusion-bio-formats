@@ -457,3 +457,46 @@ Consumer integration removes the obsolete structure-specific Gemmi, PEGTL and
 Boost notices, synchronizes Foldcomp MIT attribution, and updates build/docs
 and distribution validation. Final Git pins, rebuilt distributions and installed
 consumer evidence are recorded in the next checkpoint once validated.
+
+## 2026-09-21: Pinned production consumer and distribution evidence
+
+Both feature branches are pushed as `feat/rust-structure-codecs`. Consumer
+`2df81f1ae41d9a5791e07d89cf3cf1f520691414` pins all 17 formats dependencies to
+`7681a92c26d9748f588ef517b5036538aaebaeba`. That formats revision includes the
+production cutover and the CIF syntax-reference Markdown fix caught by hosted
+rustdoc. Local whole-workspace documentation now passes with warnings denied.
+The earlier failed documentation job is superseded by
+[the corrected full CI run](https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35565440662),
+which remains queued at evidence capture.
+
+The [production report](../../../testing/consumer/structure-codecs/results/2026-09-21-production.json)
+records exact revisions, source/lock/distribution/extension hashes, package file
+lists and explicit skips. The locked release wheel passes 231 installed tests
+outside the source checkout, with three unavailable HMMER cases and one opt-in
+89 MB network case skipped. The wheel and source archive contain exactly the
+Foldcomp MIT notice and explanatory README in the structure-license directory;
+obsolete Gemmi/PEGTL/Boost notices are absent. The source archive preserves the
+final Cargo pins/lock; maturin only adds README package metadata. `nm -a` finds
+no `bio_fc_` or `bio_cif_` bridge symbols. The extension still links libc++ via
+VCF/Zarr/Blosc/Snappy, which is independent of the removed codec builds.
+
+Default whole-workspace tests pass 1,978 tests across 126 suites, with 14
+explicitly ignored tests. All four external-reference release tests pass
+separately. Whole-workspace all-target/all-feature Clippy, rustdoc with denied
+warnings, feature combinations, formatting, Ruff and strict OpenSpec validation
+pass locally. The production platform run has passed both Linux reader jobs,
+external oracles and all three Rust fuzz smokes; macOS/Windows reader jobs and
+all five production wheel jobs remain running at capture. Their pending state
+is not replaced by the earlier successful runtime-trial matrix.
+
+The [hosted 93-case ARM64 release report](../../../testing/benchmarks/structure-codecs/results/2026-09-21-hosted-release.json)
+at pre-cutover `fe9c879` has 89 cases within budget, two regressions and two
+noisy cases. Isolated mixed-chain/single-segment residue-to-Arrow time ratios
+are 1.194/1.187; complete residue pipelines for those inputs remain faster at
+0.733/0.672. The longer Arrow follow-up repeats the single-segment finding at
+1.211. Allocation inspection changes the observed outcome, but does not prove
+its cause; hosted CPU sampling failed with a PMU sampling/interrupt error.
+Raw reports and that profiling failure are retained without weakening gates.
+The final sustained FCZ shard is still retrying its lost hosted runner at the
+original revision/seed. Performance, sustained fuzz, final platform delivery
+and release acceptance remain open after the explicitly requested cutover.

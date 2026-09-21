@@ -59,7 +59,7 @@ checkmarks do not claim sustained fuzz, release-performance or final wheel accep
 - [x] R4.2 Run the full small offline corpus and external-oracle verification; investigate numerical drift without relaxing established tolerances implicitly.
 - [ ] R4.3 Compare release performance and peak RSS on representative parse/decode, Arrow/residue, query and subset workloads using equal work and frozen inputs.
 - [ ] R4.4 Validate Linux x86_64/arm64, macOS x86_64/arm64 and Windows x64, plus structure/Foldcomp feature combinations and all required workspace checks.
-- [ ] R4.5 Audit package/build artifacts for removed C++ sources, build invocations and bridge symbols; retain external reference execution separately from production.
+- [x] R4.5 Audit package/build artifacts for removed C++ sources, build invocations and bridge symbols; retain external reference execution separately from production.
 - [x] R4.6 Update `.github/workflows/structures.yml` for Rust robustness checks and retained independent oracles; retire obsolete C++ sanitizer jobs only after replacement coverage exists.
 
 R4 now has source-identical ASan/libFuzzer targets, separate-process comparisons
@@ -74,10 +74,10 @@ in [IMPLEMENTATION.md](IMPLEMENTATION.md) for evidence and scope.
 
 ## R5. Integrate polars-bio and prepare release
 
-- [ ] R5.1 Hand off the compatible formats revision and fixture manifest; update all polars-bio formats pins together on a dedicated follow-up branch.
-- [ ] R5.2 Rebuild the extension; pass structure/Foldcomp, MSA and shared lazy/pushdown/metadata tests against the merged consumer baseline.
+- [x] R5.1 Hand off the compatible formats revision and fixture manifest; update all polars-bio formats pins together on a dedicated follow-up branch.
+- [x] R5.2 Rebuild the extension; pass structure/Foldcomp, MSA and shared lazy/pushdown/metadata tests against the merged consumer baseline.
 - [ ] R5.3 Build and inspect wheels/sdist; run installed-wheel tests outside the source checkout on every supported architecture.
-- [ ] R5.4 Update README/build instructions, native notices and package include rules to match the actual code/dependencies; retain attribution for translated portions.
+- [x] R5.4 Update README/build instructions, native notices and package include rules to match the actual code/dependencies; retain attribution for translated portions.
 - [ ] R5.5 Record acceptance evidence and tested rollback pins; prepare the release handoff and archive/reconcile the relevant OpenSpec changes when appropriate.
 
 An isolated Rust-backed consumer wheel and a matching native wheel each pass
@@ -85,9 +85,13 @@ An isolated Rust-backed consumer wheel and a matching native wheel each pass
 The 64-case Python/storage benchmark has matching output, 45 cases within the
 local budget and 19 noisy cases; separate SQL counters preserve 0/2/24 selected
 decodes. All five candidate wheel jobs pass: 231 tests plus four skips on each
-Linux/macOS target; Windows passes 178 and skips the MSA module. These are trial results:
-the final formats pins, C++ build removal and final distribution checks remain
-open, so the R5 delivery checkboxes are not yet complete.
+Linux/macOS target; Windows passes 178 and skips the MSA module. Those are historical
+trial results. The production consumer branch now pins all 17 formats to
+`7681a92c26d9748f588ef517b5036538aaebaeba`. Its final macOS ARM64 wheel passes the
+same 231 tests/four skips, and both wheel and sdist pass license/native-input
+audits. The codec crates have no C++ build targets, and the extension has no
+codec bridge symbols. Five-platform production delivery and release acceptance
+remain open; see the [production evidence](../../../testing/consumer/structure-codecs/results/2026-09-21-production.json).
 
 ## Verification commands available today
 

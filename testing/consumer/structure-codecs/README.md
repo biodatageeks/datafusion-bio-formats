@@ -45,3 +45,12 @@ The [earlier hosted evidence](results/2026-09-21-hosted.json) records five
 successful runtime-trial jobs before native build removal: 231 tests with four
 skips per Linux/macOS target, and 178 tests plus a skipped MSA module on Windows.
 Those historical results do not claim to test the final package contents.
+
+The [production cutover evidence](results/2026-09-21-production.json) records
+polars-bio `2df81f1ae41d9a5791e07d89cf3cf1f520691414`, with all 17 formats pinned
+to `7681a92c26d9748f588ef517b5036538aaebaeba`. The final macOS ARM64 wheel passes
+231 installed tests with four documented skips. Both codec crate packages and
+the wheel/sdist pass native-input and license checks, and the extension contains
+no codec bridge symbols. The extension still links unrelated C++ dependencies
+through VCF/Zarr/Snappy. Final hosted production matrices remain pending in that
+timestamped report.

@@ -1,0 +1,110 @@
+{
+  "scope": "instrumented diagnostic only; no acceptance ratios",
+  "perf": "/usr/bin/perf",
+  "results": [
+    {
+      "name": "arrow-native",
+      "command": [
+        "/usr/bin/perf",
+        "record",
+        "-F",
+        "199",
+        "-e",
+        "cpu-clock",
+        "-g",
+        "--call-graph",
+        "dwarf,8192",
+        "-o",
+        "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/codec-performance/profiles/arrow-native.data",
+        "--",
+        "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/release/deps/datafusion_bio_format_foldcomp-df698936402da375",
+        "--ignored",
+        "--exact",
+        "migration_benchmarks::worker",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "returncode": 255,
+      "diagnostic": "Error:\ncpu-clock:H: PMU Hardware doesn't support sampling/overflow-interrupts. Try 'perf stat'"
+    },
+    {
+      "name": "arrow-rust",
+      "command": [
+        "/usr/bin/perf",
+        "record",
+        "-F",
+        "199",
+        "-e",
+        "cpu-clock",
+        "-g",
+        "--call-graph",
+        "dwarf,8192",
+        "-o",
+        "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/codec-performance/profiles/arrow-rust.data",
+        "--",
+        "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/release/deps/datafusion_bio_format_foldcomp-df698936402da375",
+        "--ignored",
+        "--exact",
+        "migration_benchmarks::worker",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "returncode": 255,
+      "diagnostic": "Error:\ncpu-clock:H: PMU Hardware doesn't support sampling/overflow-interrupts. Try 'perf stat'"
+    },
+    {
+      "name": "residue-native",
+      "command": [
+        "/usr/bin/perf",
+        "record",
+        "-F",
+        "199",
+        "-e",
+        "cpu-clock",
+        "-g",
+        "--call-graph",
+        "dwarf,8192",
+        "-o",
+        "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/codec-performance/profiles/residue-native.data",
+        "--",
+        "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/release/deps/datafusion_bio_format_foldcomp-df698936402da375",
+        "--ignored",
+        "--exact",
+        "migration_benchmarks::worker",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "returncode": 255,
+      "diagnostic": "Error:\ncpu-clock:H: PMU Hardware doesn't support sampling/overflow-interrupts. Try 'perf stat'"
+    },
+    {
+      "name": "residue-rust",
+      "command": [
+        "/usr/bin/perf",
+        "record",
+        "-F",
+        "199",
+        "-e",
+        "cpu-clock",
+        "-g",
+        "--call-graph",
+        "dwarf,8192",
+        "-o",
+        "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/codec-performance/profiles/residue-rust.data",
+        "--",
+        "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/release/deps/datafusion_bio_format_foldcomp-df698936402da375",
+        "--ignored",
+        "--exact",
+        "migration_benchmarks::worker",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "returncode": 255,
+      "diagnostic": "Error:\ncpu-clock:H: PMU Hardware doesn't support sampling/overflow-interrupts. Try 'perf stat'"
+    }
+  ],
+  "binary_sha256": "682f37d65465ea6b700a57c1919ba54144786cf46683e36fedf9730856fe3cff",
+  "revision": "fe9c879b87e71b61f39c16d8cccd4f607b3f08eb",
+  "workflow": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35562624982",
+  "profiling_available": false
+}
