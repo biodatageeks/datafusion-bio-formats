@@ -147,6 +147,11 @@ def main():
     )
     parser.add_argument("--datasets", help="comma-separated subset")
     parser.add_argument("--stages", default="raw,decode,arrow,pipeline,query")
+    parser.add_argument(
+        "--inspect-layout",
+        action="store_true",
+        help="diagnostic: inspect decoded allocations before timing",
+    )
     parser.add_argument("--structure-bin", type=Path)
     parser.add_argument("--foldcomp-bin", type=Path)
     args = parser.parse_args()
@@ -185,6 +190,7 @@ def main():
         "method": "alternating paired fresh processes; 2 untimed warmups; preloaded input; no cache flush; query uses shared EntrySource harness; complete materialization",
         "threshold_ratio": 1.10,
         "noise_limit_mad_ratio": 0.05,
+        "diagnostic_layout_inspection": args.inspect_layout,
         "inputs": {},
         "results": [],
     }
@@ -214,7 +220,9 @@ def main():
                     continue
                 levels = (
                     ["atom", "residue"]
-                    if stage in ["arrow", "pipeline", "query"]
+                    if stage in ["arrow", "arrow_clone", "pipeline", "query"]
+                    else ["residue"]
+                    if stage == "residue"
                     else ["atom"]
                 )
                 for level in levels:
@@ -229,6 +237,7 @@ def main():
                             "iterations": 1,
                             "inputs": inputs,
                             "backend": "native",
+                            "inspect_layout": args.inspect_layout,
                         }
                         trial = measure(binaries[kind], config, directory, env)
                         config["iterations"] = max(
@@ -263,6 +272,17 @@ def main():
                                     raise RuntimeError(
                                         f"unequal work: {name}/{stage}/{field}"
                                     )
+                            if args.inspect_layout and (
+                                samples["native"][-1]["allocation_layout"][
+                                    "normalized_debug_hash"
+                                ]
+                                != samples["rust"][-1]["allocation_layout"][
+                                    "normalized_debug_hash"
+                                ]
+                            ):
+                                raise RuntimeError(
+                                    f"unequal normalized values: {name}/{stage}"
+                                )
                         medians = {}
                         for backend in samples:
                             times = [

@@ -370,3 +370,34 @@ sidecars and do not measure physical storage I/O. The counter report verifies
 the same installed extension hashes as the timing run. All 15 candidate CIF/FCZ
 Rust source files are byte-identical between the main feature branch and the
 wheel trial; only the separate routing patch enables them for ordinary builds.
+
+## 2026-09-21: Hosted wheel results and sustained campaign recovery
+
+All five jobs in [the candidate wheel run](https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35522564474)
+pass. Each Linux/macOS platform passes 231 tests with the four documented
+external/network skips; Windows passes 178 tests and skips the entire MSA
+module at collection because pyhmmer is omitted there. The
+[retained evidence](../../../testing/consumer/structure-codecs/results/2026-09-21-hosted.json)
+includes source, wheel, installed-extension and artifact hashes. This validates
+candidate runtime compatibility on the five native platforms, while final
+C++-free package checks and required whole-workspace oracle CI remain open.
+
+The sustained campaign's first attempt finishes all eight CIF shards (24.025
+measured CPU hours and 559,733,065 executions) and seven FCZ shards (21.033 CPU
+hours and 16,939,692 executions), all with zero exit status. FCZ shard 7 loses
+its hosted-runner connection without uploading a final or crash artifact.
+The GitHub annotation and completed-shard hashes/seeds are retained in the
+[partial campaign report](../../../testing/fuzz/structure-codecs/results/2026-09-21-campaign-partial.json).
+The missing shard receives no CPU credit; a resource-related cause cannot be
+excluded from that annotation alone. Failed jobs have been rerun at the same
+immutable revision and seed. R4.1 remains open until that shard and the strict
+measured-budget aggregation pass.
+
+An optional hosted ARM64 workflow now repeats uninstrumented release/Arrow
+measurements and separately inspects allocation layout, clones decoded values,
+isolates common residue construction and samples Linux CPU profiles. Those
+diagnostics do not change either decoder or relax performance/numerical gates.
+The Docker daemon on the local host is unresponsive, so hosted native runners
+provide the follow-up environment without restarting the user's containers.
+The existing full workspace CI also has a manual dispatch entry point for its
+required bcftools/PLINK/BGEN oracle environment. Dispatch is not test acceptance.

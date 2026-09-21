@@ -48,6 +48,27 @@ lock hash, platform/toolchain, medians, noise estimates and local budget flags.
 as a full acceptance run. Optional binary paths avoid rebuilding; both are required.
 Run performance measurements without concurrent builds/fuzz campaigns.
 
+For a native hosted Linux ARM64 follow-up, dispatch:
+
+```sh
+gh workflow run structures.yml --repo biodatageeks/datafusion-bio-formats \
+  --ref feat/rust-structure-codecs -f performance_validation=true
+```
+
+Separate runners collect the full 93-case matrix with one-second calibration
+and the targeted Arrow diagnostics. The latter repeats ordinary Arrow cases
+first, then uses `--inspect-layout` with `arrow,arrow_clone,residue` stages.
+`arrow_clone` deep-clones decoded entries once before timing; `residue` measures
+the common conformer/geometry construction without Arrow columns. Inspection
+records atom-vector capacity, selected string capacities and distinct 4 KiB
+pages containing selected string starts, plus a normalized Debug-value hash
+that must match between backends. These are allocation-layout indicators, not
+total allocation or resident-page measurements. The inspection and clone alter
+setup/heap state, so these runs are diagnostics, not substitutes for ordinary
+acceptance measurements. `profile_arrow.py` subsequently samples the common
+Arrow/residue paths with Linux perf's software CPU clock. It retains profiler
+failures explicitly and never turns an unavailable profile into acceptance.
+
 For a reproducible Linux ARM64 container run, including the source-identical
 array comparison first:
 

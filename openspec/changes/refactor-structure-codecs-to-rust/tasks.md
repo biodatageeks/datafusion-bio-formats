@@ -83,7 +83,8 @@ An isolated Rust-backed consumer wheel and a matching native wheel each pass
 231 installed tests on macOS ARM64, with four explicit external/network skips.
 The 64-case Python/storage benchmark has matching output, 45 cases within the
 local budget and 19 noisy cases; separate SQL counters preserve 0/2/24 selected
-decodes. A five-platform candidate wheel run is pending. These are trial results:
+decodes. All five candidate wheel jobs pass: 231 tests plus four skips on each
+Linux/macOS target; Windows passes 178 and skips the MSA module. These are trial results:
 the final formats pins, C++ build removal and final distribution checks remain
 open, so the R5 delivery checkboxes are not yet complete.
 

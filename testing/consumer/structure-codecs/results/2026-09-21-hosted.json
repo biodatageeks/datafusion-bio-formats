@@ -1,0 +1,300 @@
+{
+  "run": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35522564474",
+  "revision": "d58424b20ee147cddafb62e3deecf26f0bbe78c2",
+  "scope": "Rust runtime candidate; native build inputs remain; not final C++-free distribution acceptance",
+  "platforms": [
+    {
+      "runner": "macos-14",
+      "source": {
+        "consumer_revision": "ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa",
+        "formats_revision": "d58424b20ee147cddafb62e3deecf26f0bbe78c2",
+        "backend": "rust-candidate",
+        "candidate_routing_patch_sha256": "2bbeeac1cb918926982a4d4d51f37eff3d300cbb5b6ef137c0f03a5095bdf08b",
+        "cargo_lock_sha256": "de87226e10a0389c7f87895a4b725544df472ebc8416d06e2558d6a7c29b4189",
+        "consumer_diff_sha256": "0798b528a7a78f0fe45bf5d230200f8e65ea59b1f56fc635fba0d5f0ef955b0b",
+        "formats_diff_sha256": "7b084a609063b7b240168022b166eaf9d9156acfe9ef642f92b65639def7b721",
+        "build_scope": "runtime validation only; native build inputs remain; not a C++-free distribution"
+      },
+      "wheel": {
+        "file": "polars_bio-0.35.1-cp310-abi3-macosx_11_0_arm64.whl",
+        "sha256": "55983fa221fe432aa304bb0c84064959c0b22e4c6734020eb29087c61ee2bc34"
+      },
+      "installed_tests": {
+        "package": "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/polars_bio/__init__.py",
+        "extension": "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/polars_bio/polars_bio.abi3.so",
+        "extension_sha256": "6a63eeeee19ad5563301cecd547061529e534867b346611789ce1e41cb57b6f2",
+        "outside_checkout": "/var/folders/s6/5hzmn6lx4dz5nxs7k_0slzph0000gn/T/codec-installed-k73gjnyh",
+        "test_files": [
+          "test_io_structure.py",
+          "test_io_foldcomp.py",
+          "test_msa_io.py",
+          "test_source_metadata.py",
+          "test_comprehensive_metadata.py",
+          "test_coordinate_system_metadata.py",
+          "test_lazyframe_partitioning.py",
+          "test_pushdown_equivalence.py"
+        ],
+        "exit_code": 0,
+        "cases": 235,
+        "skips": [
+          {
+            "test": "test_live_esl_alistat_counts[PF00001.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_live_esl_alistat_counts[RF00001.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_live_esl_alistat_counts[multi.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+            "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+          }
+        ]
+      },
+      "passed": 231,
+      "artifact_sha256": {
+        "installed-tests.json": "5cd24c53fcf08a9a49d95b4fe78b07014e5bf0dd48230e3bffb0e394ce9e1a8c",
+        "installed-tests.log": "87b9736a936471abc623ff1f77beaf41e20e40fd13a0cfe92b3b86f7751e9938",
+        "installed-tests.xml": "04f3139431e082f093a4eff2b8539ba20f44ddb72f391e7dc141ca858bc8f731",
+        "source-provenance.json": "40623708377421d8d2938c3d49f8157f1783e134d9806b49e5c649daeb5461c5",
+        "wheel.json": "93124d63239bd5cb6a1ef916a9d5b46beaa6446ea3dbc27ba7f867a2279619a1"
+      }
+    },
+    {
+      "runner": "macos-15-intel",
+      "source": {
+        "consumer_revision": "ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa",
+        "formats_revision": "d58424b20ee147cddafb62e3deecf26f0bbe78c2",
+        "backend": "rust-candidate",
+        "candidate_routing_patch_sha256": "2bbeeac1cb918926982a4d4d51f37eff3d300cbb5b6ef137c0f03a5095bdf08b",
+        "cargo_lock_sha256": "de87226e10a0389c7f87895a4b725544df472ebc8416d06e2558d6a7c29b4189",
+        "consumer_diff_sha256": "0798b528a7a78f0fe45bf5d230200f8e65ea59b1f56fc635fba0d5f0ef955b0b",
+        "formats_diff_sha256": "7b084a609063b7b240168022b166eaf9d9156acfe9ef642f92b65639def7b721",
+        "build_scope": "runtime validation only; native build inputs remain; not a C++-free distribution"
+      },
+      "wheel": {
+        "file": "polars_bio-0.35.1-cp310-abi3-macosx_10_12_x86_64.whl",
+        "sha256": "4d3df7dcaf7d427e37150633ef7ef184a29bdb1c6f516796c56af9dcd4d451e1"
+      },
+      "installed_tests": {
+        "package": "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/polars_bio/__init__.py",
+        "extension": "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/polars_bio/polars_bio.abi3.so",
+        "extension_sha256": "ff4e4a3cacedc601c8a896d46225b18218a687c851e6705aeee50ed95b65c07a",
+        "outside_checkout": "/var/folders/20/jp1_0n3n7kndh6rnbqb5344m0000gn/T/codec-installed-easkc5uu",
+        "test_files": [
+          "test_io_structure.py",
+          "test_io_foldcomp.py",
+          "test_msa_io.py",
+          "test_source_metadata.py",
+          "test_comprehensive_metadata.py",
+          "test_coordinate_system_metadata.py",
+          "test_lazyframe_partitioning.py",
+          "test_pushdown_equivalence.py"
+        ],
+        "exit_code": 0,
+        "cases": 235,
+        "skips": [
+          {
+            "test": "test_live_esl_alistat_counts[PF00001.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_live_esl_alistat_counts[RF00001.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_live_esl_alistat_counts[multi.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+            "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+          }
+        ]
+      },
+      "passed": 231,
+      "artifact_sha256": {
+        "installed-tests.json": "7246c84d716940972b87ea8f11a55115bdb5073dfeb4348c40f1a4d29d9da6d6",
+        "installed-tests.log": "c4f744a1fdb24fda907812f602c27e1b44d560c023b32e8cd49ecfecc7e37513",
+        "installed-tests.xml": "25ff404152919584db7c598cc21710158e7bbc634dbdfa8f5967c77c596bbdf4",
+        "source-provenance.json": "40623708377421d8d2938c3d49f8157f1783e134d9806b49e5c649daeb5461c5",
+        "wheel.json": "15ba0bd9b2354d8dadff2ea92c1851df15710f88867b904c2c95d1b1a5dcbf06"
+      }
+    },
+    {
+      "runner": "ubuntu-22.04",
+      "source": {
+        "consumer_revision": "ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa",
+        "formats_revision": "d58424b20ee147cddafb62e3deecf26f0bbe78c2",
+        "backend": "rust-candidate",
+        "candidate_routing_patch_sha256": "2bbeeac1cb918926982a4d4d51f37eff3d300cbb5b6ef137c0f03a5095bdf08b",
+        "cargo_lock_sha256": "de87226e10a0389c7f87895a4b725544df472ebc8416d06e2558d6a7c29b4189",
+        "consumer_diff_sha256": "6566b1d254d8b33c451f0401d727a6801b2d0708b9b6f44e7b55f877c756ed07",
+        "formats_diff_sha256": "7b084a609063b7b240168022b166eaf9d9156acfe9ef642f92b65639def7b721",
+        "build_scope": "runtime validation only; native build inputs remain; not a C++-free distribution"
+      },
+      "wheel": {
+        "file": "polars_bio-0.35.1-cp310-abi3-manylinux_2_35_x86_64.whl",
+        "sha256": "e6d85e3fd5dd1a572a3a3c2f7cb586f48a8323a0244cbc8b35119de5dae9253a"
+      },
+      "installed_tests": {
+        "package": "/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/polars_bio/__init__.py",
+        "extension": "/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/polars_bio/polars_bio.abi3.so",
+        "extension_sha256": "6c79bfbbb944a1ea9777d91a15fa191f7329103c6b59ff448b2fc12ae71e6721",
+        "outside_checkout": "/tmp/codec-installed-ozpsadi7",
+        "test_files": [
+          "test_io_structure.py",
+          "test_io_foldcomp.py",
+          "test_msa_io.py",
+          "test_source_metadata.py",
+          "test_comprehensive_metadata.py",
+          "test_coordinate_system_metadata.py",
+          "test_lazyframe_partitioning.py",
+          "test_pushdown_equivalence.py"
+        ],
+        "exit_code": 0,
+        "cases": 235,
+        "skips": [
+          {
+            "test": "test_live_esl_alistat_counts[PF00001.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_live_esl_alistat_counts[RF00001.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_live_esl_alistat_counts[multi.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+            "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+          }
+        ]
+      },
+      "passed": 231,
+      "artifact_sha256": {
+        "installed-tests.json": "cd2fa8b5fa2ad1d39a7018be65aa39a82a2a273b941f13f25a8b6dc240026032",
+        "installed-tests.log": "5e56e4bd99f940e5e91ff6977c690e75d479b7f028adf3408b4b4dff47a4c377",
+        "installed-tests.xml": "d84b5843b874e07d86372113bc405862f1f231b9e9233cf2e9052fa29022f528",
+        "source-provenance.json": "d83c8d55a8ab6dac1413875f2d2e69a1f3336737473fda81041b4baa443c85fb",
+        "wheel.json": "4b0c66bce5715b419aa866be04ac7df36df2705df04a58eefffd01a9aef29e1d"
+      }
+    },
+    {
+      "runner": "ubuntu-24.04-arm",
+      "source": {
+        "consumer_revision": "ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa",
+        "formats_revision": "d58424b20ee147cddafb62e3deecf26f0bbe78c2",
+        "backend": "rust-candidate",
+        "candidate_routing_patch_sha256": "2bbeeac1cb918926982a4d4d51f37eff3d300cbb5b6ef137c0f03a5095bdf08b",
+        "cargo_lock_sha256": "de87226e10a0389c7f87895a4b725544df472ebc8416d06e2558d6a7c29b4189",
+        "consumer_diff_sha256": "6566b1d254d8b33c451f0401d727a6801b2d0708b9b6f44e7b55f877c756ed07",
+        "formats_diff_sha256": "7b084a609063b7b240168022b166eaf9d9156acfe9ef642f92b65639def7b721",
+        "build_scope": "runtime validation only; native build inputs remain; not a C++-free distribution"
+      },
+      "wheel": {
+        "file": "polars_bio-0.35.1-cp310-abi3-manylinux_2_39_aarch64.whl",
+        "sha256": "dd2b84668940b7cca3b90f5058451d00dcfda6482658ef77fc44bfe8ea3832a1"
+      },
+      "installed_tests": {
+        "package": "/opt/hostedtoolcache/Python/3.12.14/arm64/lib/python3.12/site-packages/polars_bio/__init__.py",
+        "extension": "/opt/hostedtoolcache/Python/3.12.14/arm64/lib/python3.12/site-packages/polars_bio/polars_bio.abi3.so",
+        "extension_sha256": "9a1fd7a5f89f77e3cc51275ebabb56b0aa28767b5ddeab5907cc0ea6c041fb8b",
+        "outside_checkout": "/tmp/codec-installed-t29dui7q",
+        "test_files": [
+          "test_io_structure.py",
+          "test_io_foldcomp.py",
+          "test_msa_io.py",
+          "test_source_metadata.py",
+          "test_comprehensive_metadata.py",
+          "test_coordinate_system_metadata.py",
+          "test_lazyframe_partitioning.py",
+          "test_pushdown_equivalence.py"
+        ],
+        "exit_code": 0,
+        "cases": 235,
+        "skips": [
+          {
+            "test": "test_live_esl_alistat_counts[PF00001.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_live_esl_alistat_counts[RF00001.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_live_esl_alistat_counts[multi.sto]",
+            "reason": "HMMER not on PATH"
+          },
+          {
+            "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+            "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+          }
+        ]
+      },
+      "passed": 231,
+      "artifact_sha256": {
+        "installed-tests.json": "787611112b30ee0ede9c6c753b58662f887f488f8a238a71b163412d94d5882d",
+        "installed-tests.log": "d5157a57fe97879b7e1d52844fc548d73c298783a89bd4246632727e904c6221",
+        "installed-tests.xml": "dfe64e81f2f6f213be7ba75a9a1b257704b479e86b0073b27bd81c7363f23b29",
+        "source-provenance.json": "d83c8d55a8ab6dac1413875f2d2e69a1f3336737473fda81041b4baa443c85fb",
+        "wheel.json": "15f9831982cea0220ac3837e44be59448f0a69b8d02b2a4cb2f53e081f638387"
+      }
+    },
+    {
+      "runner": "windows-2022",
+      "source": {
+        "consumer_revision": "ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa",
+        "formats_revision": "d58424b20ee147cddafb62e3deecf26f0bbe78c2",
+        "backend": "rust-candidate",
+        "candidate_routing_patch_sha256": "aafaf7265f5db7e840f473716678ae61ec6585e99114f537c20a456f065029ab",
+        "cargo_lock_sha256": "90a1a4b22978b1822d8aaffd56e0162f9dfa432cb5ed168fda718ba8321b1ed7",
+        "consumer_diff_sha256": "b082cc7f6b9ed4d3eac34a37218d58e6efcac0322a370f3e76f916fceab61ab1",
+        "formats_diff_sha256": "7b084a609063b7b240168022b166eaf9d9156acfe9ef642f92b65639def7b721",
+        "build_scope": "runtime validation only; native build inputs remain; not a C++-free distribution"
+      },
+      "wheel": {
+        "file": "polars_bio-0.35.1-cp310-abi3-win_amd64.whl",
+        "sha256": "d6ab53c94face785cf5a27698910db1c96129505491cd8abc192be1b3602908f"
+      },
+      "installed_tests": {
+        "package": "C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\polars_bio\\__init__.py",
+        "extension": "C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\polars_bio\\polars_bio.pyd",
+        "extension_sha256": "b3d9e415288e8608effa696403ee0115590ec17fd72f3b75eef46cd18d45b8a7",
+        "outside_checkout": "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\codec-installed-uo_yxmoi",
+        "test_files": [
+          "test_io_structure.py",
+          "test_io_foldcomp.py",
+          "test_msa_io.py",
+          "test_source_metadata.py",
+          "test_comprehensive_metadata.py",
+          "test_coordinate_system_metadata.py",
+          "test_lazyframe_partitioning.py",
+          "test_pushdown_equivalence.py"
+        ],
+        "exit_code": 0,
+        "cases": 179,
+        "skips": [
+          {
+            "test": "tests.test_msa_io",
+            "reason": "collection skipped"
+          }
+        ]
+      },
+      "passed": 178,
+      "artifact_sha256": {
+        "installed-tests.json": "f1a929480a527947e0c6df7e7645eb9cbddac392d48c2448810764ee0e8b7e2f",
+        "installed-tests.log": "ace8b1796b36ff15f308ecc90731bde5759a82930dc1343c7fa2b880083044c5",
+        "installed-tests.xml": "6c322691f71e96d992ae2e13f4857f5d51474e459b38776766b3184c163cd64c",
+        "source-provenance.json": "c5dbba20451d791d8ae92593beca149fa54ec44573301fd1c77b997cc4778140",
+        "wheel.json": "91b43ee71db5a671bfb0c804a93ed5b4cb874bca13043dca334be85b1d2799cc"
+      }
+    }
+  ]
+}

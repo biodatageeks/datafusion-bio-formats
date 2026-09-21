@@ -1,0 +1,55 @@
+name: Structure codec release measurements
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [release, diagnostic]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codec-performance
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build before timing
+        run: cargo test --locked --release --lib --no-run -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp
+      - name: Measure complete release matrix
+        if: matrix.scope == 'release'
+        run: python testing/benchmarks/structure-codecs/run.py --output target/codec-performance/release.json --samples 9 --seconds 1
+      - name: Repeat Arrow cases without inspection
+        if: matrix.scope == 'diagnostic'
+        run: python testing/benchmarks/structure-codecs/run.py --output target/codec-performance/arrow.json --datasets fcz_long_mixed,fcz_long_segment --stages arrow --samples 9 --seconds 2
+      - name: Inspect allocations and isolate residue work
+        if: matrix.scope == 'diagnostic'
+        run: python testing/benchmarks/structure-codecs/run.py --output target/codec-performance/layout.json --datasets fcz_long_mixed,fcz_long_segment --stages arrow,arrow_clone,residue --inspect-layout --samples 9 --seconds 1
+      - name: Install sampling profiler
+        if: matrix.scope == 'diagnostic'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y linux-tools-generic
+          sudo sysctl kernel.perf_event_paranoid=-1
+      - name: Profile common Arrow and residue code
+        if: matrix.scope == 'diagnostic'
+        run: python testing/benchmarks/structure-codecs/profile_arrow.py --output target/codec-performance/profiles --seconds 30
+      - name: Retain all samples and profiles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-performance-${{ matrix.scope }}
+          path: target/codec-performance
+          retention-days: 14

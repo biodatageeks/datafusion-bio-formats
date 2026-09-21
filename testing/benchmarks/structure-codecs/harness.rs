@@ -8,6 +8,8 @@ use datafusion_bio_format_structure::{
 use futures::StreamExt;
 use serde_json::{Value, json};
 use std::{
+    collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     hint::black_box,
     sync::{
         Arc,
@@ -18,6 +20,39 @@ use std::{
 
 pub(super) type Decoder = fn(&[u8], &StructureOptions) -> Result<Vec<NormalizedEntry>>;
 pub(super) type Raw = fn(&[u8]) -> Result<usize>;
+
+// Diagnostic only: expose allocation differences without changing either decoder.
+fn layout(entries: &[Vec<NormalizedEntry>]) -> Value {
+    let mut pages = BTreeSet::new();
+    let mut capacities = BTreeMap::<&str, usize>::new();
+    let mut atom_capacity = 0;
+    for entry in entries.iter().flatten() {
+        atom_capacity += entry.atoms.capacity();
+        for atom in &entry.atoms {
+            for (name, value) in [
+                ("atom_id", atom.atom_id.as_ref()),
+                ("atom_name", Some(&atom.atom_name)),
+                ("residue_name", Some(&atom.residue_name)),
+                ("record_type", Some(&atom.record_type)),
+                ("auth_atom_id", atom.auth_atom_id.as_ref()),
+                ("auth_comp_id", atom.auth_comp_id.as_ref()),
+                ("auth_asym_id", atom.auth_asym_id.as_ref()),
+                ("auth_seq_id", atom.auth_seq_id.as_ref()),
+            ] {
+                if let Some(value) = value {
+                    *capacities.entry(name).or_default() += value.capacity();
+                    if !value.is_empty() {
+                        pages.insert(value.as_ptr() as usize / 4096);
+                    }
+                }
+            }
+        }
+    }
+    let mut hash = DefaultHasher::new();
+    format!("{entries:?}").hash(&mut hash);
+    json!({"atom_capacity": atom_capacity, "string_capacities": capacities,
+        "string_start_pages_4k": pages.len(), "normalized_debug_hash": hash.finish()})
+}
 
 #[derive(Debug)]
 struct Source {
@@ -95,13 +130,21 @@ pub(super) fn run(config: Value, decoder: Decoder, raw: Option<Raw>) -> Result<(
             sources,
             options.clone(),
         )?))?;
-        let decoded = if stage == "arrow" {
+        let mut decoded = if matches!(stage, "arrow" | "arrow_clone" | "residue") {
             inputs
                 .iter()
                 .map(|d| decoder(d, &options))
                 .collect::<Result<Vec<_>>>()?
         } else {
             vec![]
+        };
+        if stage == "arrow_clone" {
+            decoded = decoded.clone();
+        }
+        let allocation_layout = if config["inspect_layout"].as_bool().unwrap_or(false) {
+            Some(layout(&decoded))
+        } else {
+            None
         };
         let mut seconds = 0.0;
         let mut first_batch_seconds = 0.0;
@@ -126,7 +169,15 @@ pub(super) fn run(config: Value, decoder: Decoder, raw: Option<Raw>) -> Result<(
                     for (i, input) in inputs.iter().enumerate() {
                         if stage == "raw" {
                             rows += black_box(raw.expect("raw CIF adapter")(black_box(input))?);
-                        } else if stage == "arrow" {
+                        } else if stage == "residue" {
+                            for entry in &decoded[i] {
+                                rows +=
+                                    black_box(datafusion_bio_format_structure::residue::residues(
+                                        entry, &options,
+                                    ))
+                                    .len();
+                            }
+                        } else if matches!(stage, "arrow" | "arrow_clone") {
                             for entry in &decoded[i] {
                                 rows += black_box(batch_builder::build(
                                     entry,
@@ -171,6 +222,7 @@ pub(super) fn run(config: Value, decoder: Decoder, raw: Option<Raw>) -> Result<(
                 "seconds": seconds, "first_batch_seconds": first_batch_seconds,
                 "iterations": iterations, "rows": total_rows,
                 "decode_calls": total_calls, "input_bytes": bytes_per_iteration * iterations,
+                "allocation_layout": allocation_layout,
             })
         );
         Ok(())

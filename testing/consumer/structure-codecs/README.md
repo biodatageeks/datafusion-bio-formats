@@ -47,3 +47,10 @@ sources/build scripts remain in the trial, and two decoder inspection helpers
 still warn in ordinary builds. Final cutover must remove native artifacts, resolve
 those warnings, restore denied-warning distribution checks, test the final pins
 and inspect wheels/sdist. This manual workflow has no publish or merge action.
+
+The [2026-09-21 hosted evidence](results/2026-09-21-hosted.json) records all five
+successful jobs at `d58424b20ee147cddafb62e3deecf26f0bbe78c2`: 231 tests pass
+with four explicit skips on each Linux/macOS target; Windows passes 178 tests
+and skips collection of the MSA module because pyhmmer is unavailable. Source,
+wheel, extension and downloaded artifact hashes are retained. Native build
+inputs still remain, so this closes the candidate runtime matrix only.
