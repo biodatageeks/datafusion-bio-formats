@@ -23,7 +23,7 @@ The provider SHALL expose A2M and A3M records with the FASTA schema `name` (Utf8
 
 ### Requirement: Verbatim alignment sequences
 
-The provider SHALL return the `sequence` of an A2M or A3M record as the exact concatenation of its sequence lines, preserving letter case, `-` and `.`, and SHALL NOT expand, pad or validate the alignment.
+The provider SHALL return the `sequence` of an A2M or A3M record as the exact concatenation of its non-comment sequence lines, preserving letter case, `-` and `.`, and SHALL NOT expand, pad or validate the alignment.
 
 #### Scenario: Ragged A3M rows
 
@@ -51,7 +51,7 @@ The provider SHALL skip lines beginning with `#` that precede the first `>` reco
 
 #### Scenario: Data before the first record is an error
 
-- **WHEN** a non-`#` line precedes the first `>` record
+- **WHEN** a non-`#` line not matched by a configured comment prefix precedes the first `>` record
 - **THEN** the scan fails with an error naming the path
 
 ### Requirement: Stockholm logical schema
@@ -266,3 +266,24 @@ The provider SHALL be verified against independent reference implementations for
 
 - **WHEN** an A3M fixture is scanned with reserved pseudo-sequences excluded
 - **THEN** every row has the same number of match columns, equal to the count Easel reports for the same input
+
+### Requirement: Configurable A2M and A3M comment prefixes
+
+The A2M/A3M readers SHALL accept an optional literal `comment_prefix`, defaulting to `None`, and skip lines beginning with that prefix anywhere in the input before parsing records. Matching SHALL preserve inline occurrences and SHALL NOT trim leading whitespace. Prefixes MAY contain multiple UTF-8 characters; empty prefixes and prefixes containing line breaks SHALL be rejected. Leading `#` header lines SHALL continue to be skipped independently of this option.
+
+#### Scenario: Semicolon comments
+- **WHEN** an A2M or A3M input has semicolon-prefixed comments before, within, or after records and `comment_prefix=";"` is supplied
+- **THEN** the returned sequences contain only the remaining sequence lines
+- **AND** eager, lazy, SQL, projected, and row-count queries agree for plain, GZIP, and BGZF input
+
+#### Scenario: Default preserves existing behavior
+- **WHEN** `comment_prefix` is omitted or `None`
+- **THEN** sequence lines remain verbatim and only the existing leading `#` header handling applies
+
+#### Scenario: Literal prefix matching
+- **WHEN** `comment_prefix=";;"` is supplied
+- **THEN** only lines starting with exactly `;;` are skipped, while inline or indented occurrences are preserved
+
+#### Scenario: Invalid prefix
+- **WHEN** a prefix is empty or contains a carriage return or newline
+- **THEN** constructing the reader fails with an error naming `comment_prefix`
