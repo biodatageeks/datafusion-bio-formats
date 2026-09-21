@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-foldcomp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Protein foldcomp atom and residue table providers for DataFusion"
 license = "Apache-2.0 AND MIT"
 authors.workspace = true
@@ -12,7 +12,7 @@ edition.workspace = true
 datafusion.workspace = true
 async-trait.workspace = true
 futures.workspace = true
-datafusion-bio-format-core = { path = "../bio-format-core", version = "1.13.0" }
+datafusion-bio-format-core = { path = "../bio-format-core", version = "1.13.1" }
 
 [dev-dependencies]
 tokio.workspace = true
@@ -21,7 +21,7 @@ serde_json.workspace = true
 
 [dependencies.datafusion-bio-format-structure]
 path = "../bio-format-structure"
-version = "0.2.0"
+version = "0.2.1"
 default-features = false
 
 [features]
