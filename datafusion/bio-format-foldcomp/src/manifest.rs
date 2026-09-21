@@ -1,4 +1,7 @@
-use crate::{FoldcompOptions, codec};
+use crate::{
+    FoldcompOptions, codec,
+    index::{IndexRow, integer},
+};
 use async_trait::async_trait;
 use datafusion::common::Result;
 use datafusion_bio_format_structure::{
@@ -66,10 +69,6 @@ fn each_line(path: &str, mut visit: impl FnMut(usize, &str) -> Result<()>) -> Re
         visit(ordinal, line).map_err(|e| error(format!("{path}:{row}: {e}")))?;
     }
     Ok(())
-}
-fn integer(s: &str) -> Result<u64> {
-    s.parse()
-        .map_err(|_| error(format!("invalid unsigned integer {s:?}")))
 }
 pub fn select(path: &str, options: &FoldcompOptions) -> Result<Vec<SelectedEntry>> {
     if path.contains("://") {
@@ -156,28 +155,13 @@ pub fn select(path: &str, options: &FoldcompOptions) -> Result<Vec<SelectedEntry
     let mut result = Vec::new();
     let mut previous = None;
     each_line(&index, |row, line| {
-        let v: Vec<_> = line.split_whitespace().collect();
-        if v.len() != 3 {
-            return Err(error("index requires key, offset, length"));
-        }
-        let key = integer(v[0])?;
-        let offset = integer(v[1])?;
-        let len = integer(v[2])?;
-        if previous.is_some_and(|p| p >= key) {
-            return Err(error("Foldcomp index keys must be unique and increasing"));
-        }
+        let IndexRow { key, offset, len } = IndexRow::parse(line, previous)?;
         previous = Some(key);
         if keys.as_ref().is_none_or(|k| k.contains(&key)) {
-            if len < 2
-                || len > options.structure.max_input_bytes as u64
-                || offset
-                    .checked_add(len)
-                    .is_none_or(|end| end > identities[0].1.len)
-            {
-                return Err(error(format!(
-                    "invalid selected payload range for key {key}"
-                )));
-            }
+            IndexRow { key, offset, len }.validate_selected(
+                identities[0].1.len,
+                options.structure.max_input_bytes as u64,
+            )?;
             result.push(SelectedEntry {
                 path: path.into(),
                 key: Some(key),

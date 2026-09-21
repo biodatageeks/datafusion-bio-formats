@@ -1,0 +1,107 @@
+{
+  "platform": "macOS-15.7.9-arm64-arm-64bit",
+  "machine": "arm64",
+  "toolchain": "rustc 1.95.0-nightly (57d2fb136 2026-02-01)",
+  "cargo_fuzz": "cargo-fuzz 0.13.2",
+  "revision": "b25f72c466bda4f485e532bc23e3dca18d0424e1",
+  "diff_sha256": "b71be2a689bec6a4a5633db6a11af530ad8f202e358fd187227353e4712fcea7",
+  "harness_sha256": "b58e66fc21e836a8f4ed0009f23f2a8402e14aa366f0463586c1ee3e54bd6d47",
+  "runs": [
+    {
+      "target": "cif_document",
+      "command": [
+        "cargo",
+        "+nightly-2026-02-02",
+        "fuzz",
+        "run",
+        "--fuzz-dir",
+        "/Users/mwiewior/research/git/datafusion-bio-formats-rust-structure-plan/testing/fuzz/structure-codecs",
+        "cif_document",
+        "--",
+        "-max_total_time=60",
+        "-max_len=262144",
+        "-seed=20260920",
+        "-timeout=10",
+        "-rss_limit_mb=2048",
+        "-print_final_stats=1"
+      ],
+      "seed_corpus": {
+        "count": 1027,
+        "sha256": "41a9e17b3e4920daa4d35eeea29761df5d8eb46ec8d49d7b2ea712eb9b1012db"
+      },
+      "exit_code": 0,
+      "wall_seconds": 63.982094124890864,
+      "child_cpu_seconds": 62.379999999999995,
+      "executions": 542238,
+      "final_corpus": {
+        "count": 2072,
+        "sha256": "20d00a1214a4acff174409ca306db25a799c6c90be663f11a4034ed5c06e3b32"
+      },
+      "log_sha256": "426b21cb8dbf76cfc0ff2da2356421b71a5c9ff36adb33e8e6150455861d32b1"
+    },
+    {
+      "target": "fcz_decode",
+      "command": [
+        "cargo",
+        "+nightly-2026-02-02",
+        "fuzz",
+        "run",
+        "--fuzz-dir",
+        "/Users/mwiewior/research/git/datafusion-bio-formats-rust-structure-plan/testing/fuzz/structure-codecs",
+        "fcz_decode",
+        "--",
+        "-max_total_time=60",
+        "-max_len=65536",
+        "-seed=20260920",
+        "-timeout=10",
+        "-rss_limit_mb=2048",
+        "-print_final_stats=1"
+      ],
+      "seed_corpus": {
+        "count": 433,
+        "sha256": "e118f4d8403ed0b9031b53f6c54bf38f497264022c43182f206a249fdfbf3200"
+      },
+      "exit_code": 0,
+      "wall_seconds": 62.17949679191224,
+      "child_cpu_seconds": 61.440000000000005,
+      "executions": 14825,
+      "final_corpus": {
+        "count": 487,
+        "sha256": "0974287f79e0db2433d403381d0d02b7823ea8bac6ac5ad8780c61ba5764e3f1"
+      },
+      "log_sha256": "59571f1f1a585cb668388dfee5b6b77a952fd2e2e8495c3c9299659193c34d03"
+    },
+    {
+      "target": "selected_range",
+      "command": [
+        "cargo",
+        "+nightly-2026-02-02",
+        "fuzz",
+        "run",
+        "--fuzz-dir",
+        "/Users/mwiewior/research/git/datafusion-bio-formats-rust-structure-plan/testing/fuzz/structure-codecs",
+        "selected_range",
+        "--",
+        "-max_total_time=60",
+        "-max_len=4096",
+        "-seed=20260920",
+        "-timeout=10",
+        "-rss_limit_mb=2048",
+        "-print_final_stats=1"
+      ],
+      "seed_corpus": {
+        "count": 111,
+        "sha256": "2039edb1dd9a8b642da84cc760554427694a7c31e3d26487575bbeaf7637541f"
+      },
+      "exit_code": 0,
+      "wall_seconds": 62.15205104206689,
+      "child_cpu_seconds": 61.21999999999999,
+      "executions": 22891334,
+      "final_corpus": {
+        "count": 404,
+        "sha256": "e43cb84b98af43ad92fdf2e22521fe8ed66d1df493879b94afaffc8e65b32f86"
+      },
+      "log_sha256": "3e1363e654fb6b1c37dfe3cc8a791f14f5b208c1134751f1937657ba66eb1a6b"
+    }
+  ]
+}

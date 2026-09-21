@@ -1,0 +1,252 @@
+[
+  {
+    "code": 0,
+    "name_hex": "414c41",
+    "letter": 65,
+    "supported": true,
+    "sidechain_count": 2,
+    "atom_count": 5
+  },
+  {
+    "code": 1,
+    "name_hex": "415247",
+    "letter": 82,
+    "supported": true,
+    "sidechain_count": 8,
+    "atom_count": 11
+  },
+  {
+    "code": 2,
+    "name_hex": "41534e",
+    "letter": 78,
+    "supported": true,
+    "sidechain_count": 5,
+    "atom_count": 8
+  },
+  {
+    "code": 3,
+    "name_hex": "415350",
+    "letter": 68,
+    "supported": true,
+    "sidechain_count": 5,
+    "atom_count": 8
+  },
+  {
+    "code": 4,
+    "name_hex": "435953",
+    "letter": 67,
+    "supported": true,
+    "sidechain_count": 3,
+    "atom_count": 6
+  },
+  {
+    "code": 5,
+    "name_hex": "474c4e",
+    "letter": 81,
+    "supported": true,
+    "sidechain_count": 6,
+    "atom_count": 9
+  },
+  {
+    "code": 6,
+    "name_hex": "474c55",
+    "letter": 69,
+    "supported": true,
+    "sidechain_count": 6,
+    "atom_count": 9
+  },
+  {
+    "code": 7,
+    "name_hex": "474c59",
+    "letter": 71,
+    "supported": true,
+    "sidechain_count": 1,
+    "atom_count": 4
+  },
+  {
+    "code": 8,
+    "name_hex": "484953",
+    "letter": 72,
+    "supported": true,
+    "sidechain_count": 7,
+    "atom_count": 10
+  },
+  {
+    "code": 9,
+    "name_hex": "494c45",
+    "letter": 73,
+    "supported": true,
+    "sidechain_count": 5,
+    "atom_count": 8
+  },
+  {
+    "code": 10,
+    "name_hex": "4c4555",
+    "letter": 76,
+    "supported": true,
+    "sidechain_count": 5,
+    "atom_count": 8
+  },
+  {
+    "code": 11,
+    "name_hex": "4c5953",
+    "letter": 75,
+    "supported": true,
+    "sidechain_count": 6,
+    "atom_count": 9
+  },
+  {
+    "code": 12,
+    "name_hex": "4d4554",
+    "letter": 77,
+    "supported": true,
+    "sidechain_count": 5,
+    "atom_count": 8
+  },
+  {
+    "code": 13,
+    "name_hex": "504845",
+    "letter": 70,
+    "supported": true,
+    "sidechain_count": 8,
+    "atom_count": 11
+  },
+  {
+    "code": 14,
+    "name_hex": "50524f",
+    "letter": 80,
+    "supported": true,
+    "sidechain_count": 4,
+    "atom_count": 7
+  },
+  {
+    "code": 15,
+    "name_hex": "534552",
+    "letter": 83,
+    "supported": true,
+    "sidechain_count": 3,
+    "atom_count": 6
+  },
+  {
+    "code": 16,
+    "name_hex": "544852",
+    "letter": 84,
+    "supported": true,
+    "sidechain_count": 4,
+    "atom_count": 7
+  },
+  {
+    "code": 17,
+    "name_hex": "545250",
+    "letter": 87,
+    "supported": true,
+    "sidechain_count": 11,
+    "atom_count": 14
+  },
+  {
+    "code": 18,
+    "name_hex": "545952",
+    "letter": 89,
+    "supported": true,
+    "sidechain_count": 9,
+    "atom_count": 12
+  },
+  {
+    "code": 19,
+    "name_hex": "56414c",
+    "letter": 86,
+    "supported": true,
+    "sidechain_count": 4,
+    "atom_count": 7
+  },
+  {
+    "code": 20,
+    "name_hex": "415358",
+    "letter": 66,
+    "supported": false
+  },
+  {
+    "code": 21,
+    "name_hex": "474c58",
+    "letter": 90,
+    "supported": false
+  },
+  {
+    "code": 22,
+    "name_hex": "535450",
+    "letter": 42,
+    "supported": false
+  },
+  {
+    "code": 23,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  },
+  {
+    "code": 24,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  },
+  {
+    "code": 25,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  },
+  {
+    "code": 26,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  },
+  {
+    "code": 27,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  },
+  {
+    "code": 28,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  },
+  {
+    "code": 29,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  },
+  {
+    "code": 30,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  },
+  {
+    "code": 31,
+    "name_hex": "554e4b",
+    "letter": 88,
+    "supported": true,
+    "sidechain_count": 0,
+    "atom_count": 3
+  }
+]

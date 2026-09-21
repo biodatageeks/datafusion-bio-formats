@@ -1,8 +1,8 @@
 //! Raw mmCIF categories preserve label/auth namespaces and quoted missing tokens.
+use crate::cif::{CategoryBlock, Document};
 use crate::{
     error,
     model::{Atom, NormalizedEntry},
-    native_cif::{CategoryBlock, Document},
     options::StructureOptions,
     residue::amino_acid,
 };
@@ -30,7 +30,7 @@ fn float(s: Option<&str>, tag: &str) -> Result<Option<f64>> {
     Ok(v)
 }
 /// A parsed document whose data blocks decode one at a time, so a multi-block source never
-/// holds more than one normalized entry alongside the native document.
+/// holds more than one normalized entry alongside the parsed document.
 pub struct Blocks(Document);
 impl Blocks {
     pub fn parse(data: &[u8]) -> Result<Self> {
@@ -254,4 +254,28 @@ fn decode(
     }
     entry.normalize(options)?;
     Ok(Some(entry))
+}
+
+/// Compare mapping with the separately executed, pinned legacy parser.
+#[cfg(test)]
+pub(crate) fn parse_external_reference(
+    data: &[u8],
+    options: &StructureOptions,
+) -> Result<Vec<NormalizedEntry>> {
+    let document = crate::reference_cif::Document::parse(data)?;
+    let mut entries = Vec::new();
+    for index in 0..document.block_count() {
+        let view = document.block(index)?;
+        let block = CategoryBlock {
+            name: view.name,
+            columns: view.columns,
+        };
+        if let Some(entry) = decode(&block, index, options)? {
+            entries.push(entry);
+        }
+    }
+    if entries.is_empty() {
+        return Err(error("mmCIF contains no atom_site category"));
+    }
+    Ok(entries)
 }

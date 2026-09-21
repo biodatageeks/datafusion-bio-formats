@@ -1,7 +1,17 @@
 //! Local standalone FCZ and indexed Foldcomp database table providers.
 //! Selectors are resolved from metadata before payload decoding; empty means zero rows.
 pub mod codec;
+#[cfg(test)]
+mod codec_goldens;
+mod fcz;
+mod index;
 mod manifest;
+#[cfg(test)]
+#[path = "../../../testing/oracles/structure-codecs/reference_foldcomp.rs"]
+mod reference_foldcomp;
+#[cfg(test)]
+#[path = "../../../testing/oracles/structure-codecs/reference_process.rs"]
+mod reference_process;
 use async_trait::async_trait;
 use datafusion::{
     arrow::datatypes::SchemaRef,
@@ -62,3 +72,13 @@ impl TableProvider for FoldcompTableProvider {
         self.inner.scan(state, projection, filters, limit).await
     }
 }
+
+// Reuse the exact integration suite against the test-only Rust provider path.
+#[cfg(test)]
+extern crate self as datafusion_bio_format_foldcomp;
+#[cfg(test)]
+#[path = "../tests/foldcomp.rs"]
+mod rust_provider_tests;
+
+#[cfg(test)]
+mod migration_benchmarks;

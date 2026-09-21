@@ -1,0 +1,115 @@
+{
+  "platform": "macOS ARM64",
+  "consumer_revision": "ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa",
+  "native_formats_revision": "a4af2ef3b7491de34f45d228a841126c48d98d97",
+  "rust_formats_revision": "0fcf32d5fe3ad1730aa2826829bbade0ba9eff01",
+  "candidate_routing_base": "f96d1b0d82b709f161196c3b426f09bdc3d2b0f1",
+  "routing_patch_sha256": "2bbeeac1cb918926982a4d4d51f37eff3d300cbb5b6ef137c0f03a5095bdf08b",
+  "build": "maturin 1.13.3; Rust 1.91.0; release; default mimalloc; Python 3.12.2; all 17 formats use one path-pinned checkout; locked dependency graph unchanged except formats Git sources removed",
+  "scope": "runtime trial; native build inputs remain; not final C++-free package acceptance",
+  "backends": {
+    "native": {
+      "wheel": "polars_bio-0.35.1-cp310-abi3-macosx_11_0_arm64.whl",
+      "wheel_sha256": "c3eddbef4b5321cc4e3aa09e5e89ef9faa18e967648a1c9a263e5b6967ee88fe",
+      "passed": 231,
+      "skips": [
+        {
+          "test": "test_live_esl_alistat_counts[PF00001.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_live_esl_alistat_counts[RF00001.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_live_esl_alistat_counts[multi.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+          "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+        }
+      ],
+      "junit_sha256": "4b15a4d7b03d86c7b515d6dfaf727a72c7b919ee045d8362b985e2f2073d37a1",
+      "build_log_sha256": "7f8ffd4e654400402df32959f8359e2529cbf8e55415ee810f1ffd89bb2f9258"
+    },
+    "rust": {
+      "wheel": "polars_bio-0.35.1-cp310-abi3-macosx_11_0_arm64.whl",
+      "wheel_sha256": "5815dc955d3bb7e7e0647f850c1e9271209071a2b01fa3f41425ab3782c36891",
+      "passed": 231,
+      "skips": [
+        {
+          "test": "test_live_esl_alistat_counts[PF00001.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_live_esl_alistat_counts[RF00001.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_live_esl_alistat_counts[multi.sto]",
+          "reason": "HMMER not on PATH"
+        },
+        {
+          "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+          "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+        }
+      ],
+      "junit_sha256": "fa834c42b7d39b5b7fb2e2afe53ed323bf55c8aa99f133e16f6c58dd4e8d54e9",
+      "build_log_sha256": "17392cd0cae278f5ec5600f85469baefdc161fb7e74115ed471a524ba9989e89"
+    }
+  },
+  "consumer_lock_sha256": "de87226e10a0389c7f87895a4b725544df472ebc8416d06e2558d6a7c29b4189",
+  "installed_extension_audit": {
+    "native": {
+      "bridge_symbols": [
+        "_bio_cif_blocks",
+        "_bio_cif_error",
+        "_bio_cif_free",
+        "_bio_cif_read",
+        "_bio_fc_atoms",
+        "_bio_fc_decode",
+        "_bio_fc_error",
+        "_bio_fc_free",
+        "_bio_fc_title"
+      ],
+      "linked_libraries": [
+        "\t@rpath/polars_bio.abi3.so (compatibility version 0.0.0, current version 0.0.0)",
+        "\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1800.105.0)",
+        "\t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61439.60.117)",
+        "\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 3208.0.0)",
+        "\t/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)",
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)"
+      ]
+    },
+    "rust": {
+      "bridge_symbols": [],
+      "linked_libraries": [
+        "\t@rpath/polars_bio.abi3.so (compatibility version 0.0.0, current version 0.0.0)",
+        "\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1800.105.0)",
+        "\t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61439.60.117)",
+        "\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 3208.0.0)",
+        "\t/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)",
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)"
+      ]
+    }
+  },
+  "audit_scope": "nm -a (including local symbols) and otool -L; Rust trial wheel has no codec bridge symbols, but native inputs were still compiled during build",
+  "identical_candidate_core_sources": {
+    "datafusion/bio-format-structure/src/cif/document.rs": "3a6dc963e992fcf665dba8c6ad648ab3c303ae44ad4962d52ede2194945b60d3",
+    "datafusion/bio-format-structure/src/cif/mod.rs": "9b0ed93996fb2c1e2d649b16ed6ed516f809d91513e6292f801b735206b3ac0b",
+    "datafusion/bio-format-structure/src/cif/tests.rs": "43caea2611152a58d72712762eee65abb198afdc290a0258a95946c3ec6a5a5e",
+    "datafusion/bio-format-structure/src/cif/tokenizer.rs": "09a58af574a87f0482512368f2c09577a27ec315a473d91ebd2cd65b0d8fd226",
+    "datafusion/bio-format-foldcomp/src/fcz/backbone.rs": "32d43226a1d90713dbb6e5b7e41baf0b6d56afc9481ade1c835838099b79931d",
+    "datafusion/bio-format-foldcomp/src/fcz/bitstream.rs": "a9dbb65fb9c2f1e614882dff3fb0b87b6f67cc6a21a794f246c4d69b3fc7d5ec",
+    "datafusion/bio-format-foldcomp/src/fcz/decode.rs": "7d6337d5d1c209452560328419315aa93fc13257df2772388f6fa5a28dcd3ce5",
+    "datafusion/bio-format-foldcomp/src/fcz/discretize.rs": "5c3f849774be38fa409d03b4f8c85db9d839ebb0fbb78442f8d010d81cf4b129",
+    "datafusion/bio-format-foldcomp/src/fcz/geometry.rs": "c3f3f9478547310fcd1fa992b3ae2bb12cae513932fcaa42480300fe247e2072",
+    "datafusion/bio-format-foldcomp/src/fcz/header.rs": "cdda44351e87775372fb8c5decaff0dd354342afc4d188f1cfc88cc66d5cb1f0",
+    "datafusion/bio-format-foldcomp/src/fcz/mod.rs": "bb6373c4bf5b773e3dc212bab7619518e6b6962ae250154c0b42892e573b9ed1",
+    "datafusion/bio-format-foldcomp/src/fcz/numeric.rs": "9e1c9eac736185dcb934e1fc7fbf10a7b949183d4f36c146a54305d8cb26535e",
+    "datafusion/bio-format-foldcomp/src/fcz/residue.rs": "c1ba859e3ae691b1b984a71066f4c7c4e175112e55f6a6991cb9681aab4b7f43",
+    "datafusion/bio-format-foldcomp/src/fcz/tables.rs": "a99310035e31666eb51403878102dfce9558a0e369604409e2fb415c30002050",
+    "datafusion/bio-format-foldcomp/src/fcz/tests.rs": "a5ac13b4fb91ffb9fb60dbcc9b8a3df04976e38417e3dcf0c258d28b00626be5"
+  }
+}

@@ -1,0 +1,207 @@
+{
+  "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+  "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+  "generator_sha256": "1c89533d7271e6b1b2bbbf034ecf3a6c432755ed53e4516b3ea5298ace12948f",
+  "corpus_sha256": "2b79f22a33bcc52a15b07f68d8a6eae9eb48108978a96edf5e58462c90c42480",
+  "cases": [
+    {
+      "name": "long_mixed",
+      "input_sha256": "e7c7cfdfd260d9df548aa3dda3749d926c3efb9abbf1220ea55d5c8409947d74",
+      "residues": 1040,
+      "anchors": [
+        0,
+        64,
+        128,
+        192,
+        256,
+        320,
+        384,
+        448,
+        512,
+        576,
+        640,
+        704,
+        768,
+        832,
+        896,
+        960,
+        1024,
+        1039
+      ],
+      "atoms": 8685
+    },
+    {
+      "name": "long_segment",
+      "input_sha256": "f3e6a7ae5e904b40a386f863a30966bd790423679067759cdef5caa278f45992",
+      "residues": 4096,
+      "anchors": [
+        0,
+        4095
+      ],
+      "atoms": 16384
+    }
+  ],
+  "profiles": {
+    "macos-apple-clang-aarch64": {
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+        "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+        "compiler": "Apple clang version 15.0.0 (clang-1500.3.9.4)\nTarget: arm64-apple-darwin23.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_15.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+        "compiler_command": [
+          "c++"
+        ],
+        "flags": [
+          "-std=c++17",
+          "-O2",
+          "-D_USE_MATH_DEFINES",
+          "-include",
+          "exception"
+        ],
+        "platform": "macOS-14.8.9-arm64-arm-64bit",
+        "machine": "arm64"
+      },
+      "evidence_url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873",
+      "report_sha256": "7d81c852e4f3d67f93d74447689c7e5031beb9a75a5fab75ffa61c27fc1759bc",
+      "outputs": [
+        {
+          "name": "long_mixed",
+          "output_sha256": "f7079181f43ba12b4e8d85705c4ad1c28a6815670c13c6d2f02c69fa3f469a6a"
+        },
+        {
+          "name": "long_segment",
+          "output_sha256": "9a3e96cebd79443e877f404f689c4df7d9241fcc2151fcbb89622e20a5209f47"
+        }
+      ]
+    },
+    "macos-apple-clang-x86_64": {
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+        "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+        "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: x86_64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+        "compiler_command": [
+          "c++"
+        ],
+        "flags": [
+          "-std=c++17",
+          "-O2",
+          "-D_USE_MATH_DEFINES",
+          "-include",
+          "exception"
+        ],
+        "platform": "macOS-15.7.9-x86_64-i386-64bit",
+        "machine": "x86_64"
+      },
+      "evidence_url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873",
+      "report_sha256": "d1fe74975550b30699179e799d068007752f707530e771506d610e18eedce582",
+      "outputs": [
+        {
+          "name": "long_mixed",
+          "output_sha256": "bf5740ada61414c4527805a2b156ec87edb065c15375f85286b0464b3c7d97cb"
+        },
+        {
+          "name": "long_segment",
+          "output_sha256": "ed1f2b94e42a7c8960015d26880ed0c53d261a1c1a844ae0fb24fb8cc26260d9"
+        }
+      ]
+    },
+    "linux-gnu-gcc-x86_64": {
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+        "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+        "compiler": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0\nCopyright (C) 2021 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+        "compiler_command": [
+          "c++"
+        ],
+        "flags": [
+          "-std=c++17",
+          "-O2",
+          "-D_USE_MATH_DEFINES",
+          "-include",
+          "exception"
+        ],
+        "platform": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.35",
+        "machine": "x86_64"
+      },
+      "evidence_url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873",
+      "report_sha256": "2a6318d48983b63b497f826c96c3a53e2d4807a301437755abaacc91440d6997",
+      "outputs": [
+        {
+          "name": "long_mixed",
+          "output_sha256": "f9f416a65f592ce4632cac9cb2ace087d0ff1c5df1cd9dc98e7de8872138d612"
+        },
+        {
+          "name": "long_segment",
+          "output_sha256": "5b66396e6e2c9efc9a288d15bd3ead726e9cf7c819ac30856398a557f1dad78c"
+        }
+      ]
+    },
+    "linux-gnu-gcc-aarch64": {
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+        "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+        "compiler": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+        "compiler_command": [
+          "c++"
+        ],
+        "flags": [
+          "-std=c++17",
+          "-O2",
+          "-D_USE_MATH_DEFINES",
+          "-include",
+          "exception"
+        ],
+        "platform": "Linux-6.17.0-1022-azure-aarch64-with-glibc2.39",
+        "machine": "aarch64"
+      },
+      "evidence_url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873",
+      "report_sha256": "9f8cb783c23fce7e2801c266f99211ba8f37686a4f3969d19089ce6864bd99ae",
+      "outputs": [
+        {
+          "name": "long_mixed",
+          "output_sha256": "8e3314c4f54c68f19ce963898d6b61f1a2e348a0fe4766ab97ec678472eddf4a"
+        },
+        {
+          "name": "long_segment",
+          "output_sha256": "aa76c1902966c0bec6eef1866355e66340b7c526074d5b59ec0897167340367f"
+        }
+      ]
+    },
+    "windows-msvc-x86_64": {
+      "reference": {
+        "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+        "native_archive_sha256": "d8e2781487ea4f5f2188a522eccea3f1d7c798d6e6c60866b537ffc2ef3e4b7e",
+        "driver_sha256": "76f6ef8a40ef47561a4ae2df7286ba868fa9704b99b99d93408895855db77969",
+        "compiler": "usage: cl [ option... ] filename... [ /link linkoption... ]\r\nMicrosoft (R) C/C++ Optimizing Compiler Version 19.44.35228 for x64\r\nCopyright (C) Microsoft Corporation.  All rights reserved.",
+        "compiler_command": [
+          "cl"
+        ],
+        "flags": [
+          "/nologo",
+          "/std:c++17",
+          "/O2",
+          "/EHsc",
+          "/D_USE_MATH_DEFINES",
+          "/FIexception"
+        ],
+        "platform": "Windows-2022Server-10.0.20348-SP0",
+        "machine": "AMD64"
+      },
+      "evidence_url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35518305873",
+      "report_sha256": "b9c6f21ad92bc9d475ec8e49c71663d89ed2b6c334036a9f65a3726660f73220",
+      "outputs": [
+        {
+          "name": "long_mixed",
+          "output_sha256": "307274a2781f69bb2a7786dcf4ceb357f0876a6446968a56f9681cb6f6b0d9c8"
+        },
+        {
+          "name": "long_segment",
+          "output_sha256": "ff82471bf1434cbce8ce753c7c07ac4bb0e8b7742645234215636ec662311feb"
+        }
+      ]
+    }
+  }
+}

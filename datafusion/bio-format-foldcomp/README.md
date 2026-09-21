@@ -40,7 +40,7 @@ Selection happens through `ids`/`entry_keys` only: SQL predicates such as
 after every unselected payload has been decoded. Blank metadata lines are skipped
 and do not count toward `entry_index`.
 Selected bounds, terminators, header sizes, residue/sidechain counts, anchor
-indices and finite coordinates are checked before entering the upstream codec.
+indices and finite coordinates are checked before reconstruction in the Rust decoder.
 Metadata lines are capped at 1 MiB. Source/sidecar size and modification time are
 checked again at execution; modify the database only after its scans finish.
 Encoded entry size and reconstructed atom count use the shared input/atom limits;
@@ -48,12 +48,18 @@ the reconstructed count is derived from the residue codes and OXT flag before th
 codec runs, so a header cannot understate it. Unknown residue codes decode as
 backbone-only `UNK` residues, as in the upstream codec.
 
-The pinned MIT Foldcomp codec returns arrays directly, without a CLI, Python
-runtime, PDB text round-trip, OpenMP or Gemmi dependency. Coordinates are lossy
+The repository-owned Rust decoder returns arrays directly, without a CLI, Python
+runtime, PDB text round-trip, OpenMP, Gemmi or C++ build. Packing, discretization,
+residue tables and reconstruction are adapted from the MIT-licensed Foldcomp
+revision documented in `NOTICE`. Coordinates are lossy
 reconstructions; all six angles are recomputed using the shared geometry code.
 Missing source fields remain null, including occupancy, label identifiers, charge
 and element. B factors are retained without assuming pLDDT provenance.
 
 See the structure crate README for the schemas, conformer/link/angle conventions,
-query semantics and memory model. Native sources and notices are under `native/`.
-`testing/native/check-codec.sh` runs truncation/mutation smoke tests with ASan/UBSan.
+query semantics and memory model. `LICENSE-APACHE` covers the repository
+integration; `src/fcz/LICENSE-FOLDCOMP` retains the applicable MIT license and
+upstream notices for translated code. Rust property tests and the ASan/libFuzzer
+targets in `testing/fuzz/structure-codecs/` cover malformed inputs. Optional
+legacy comparisons execute an independently built, pinned historical process;
+no native codec sources are packaged or linked into this crate.

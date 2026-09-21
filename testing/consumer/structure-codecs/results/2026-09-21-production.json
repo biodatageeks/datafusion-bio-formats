@@ -1,0 +1,387 @@
+{
+  "recorded_at_utc": "2026-09-21T05:50:42.562829+00:00",
+  "formats_revision": "7681a92c26d9748f588ef517b5036538aaebaeba",
+  "consumer_revision": "2df81f1ae41d9a5791e07d89cf3cf1f520691414",
+  "branch": "feat/rust-structure-codecs",
+  "platform": "macOS ARM64",
+  "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)",
+  "consumer_cargo_toml_sha256": "da1e863db226cfd3c8127f67789b186df6c3639103de7c8a52bc3c4832e9cb24",
+  "consumer_cargo_lock_sha256": "c993656af72d1b4d9c33a1fe3a84b9b9d5bc6ffa1a7fd2734450e752f6413c0e",
+  "installed_tests": {
+    "extension_sha256": "3537feb6b9e9c99d07e2f5f5ece2854703868adda886c92828a083ea65206ffe",
+    "test_files": [
+      "test_io_structure.py",
+      "test_io_foldcomp.py",
+      "test_msa_io.py",
+      "test_source_metadata.py",
+      "test_comprehensive_metadata.py",
+      "test_coordinate_system_metadata.py",
+      "test_lazyframe_partitioning.py",
+      "test_pushdown_equivalence.py"
+    ],
+    "exit_code": 0,
+    "cases": 235,
+    "skips": [
+      {
+        "test": "test_live_esl_alistat_counts[PF00001.sto]",
+        "reason": "HMMER not on PATH"
+      },
+      {
+        "test": "test_live_esl_alistat_counts[RF00001.sto]",
+        "reason": "HMMER not on PATH"
+      },
+      {
+        "test": "test_live_esl_alistat_counts[multi.sto]",
+        "reason": "HMMER not on PATH"
+      },
+      {
+        "test": "test_scan_a3m_public_s3_concurrent_fetches_reads_all_records",
+        "reason": "downloads 89 MB from a public S3 bucket; set POLARS_BIO_NETWORK_TESTS=1"
+      }
+    ],
+    "outside_source_checkout": true
+  },
+  "packages_and_distributions": {
+    "crates": [
+      {
+        "name": "datafusion-bio-format-structure",
+        "license": "Apache-2.0",
+        "package_files": [
+          ".cargo_vcs_info.json",
+          "Cargo.lock",
+          "Cargo.toml",
+          "Cargo.toml.orig",
+          "LICENSE-APACHE",
+          "README.md",
+          "src/batch_builder.rs",
+          "src/cif/document.rs",
+          "src/cif/mod.rs",
+          "src/cif/tests.rs",
+          "src/cif/tokenizer.rs",
+          "src/cif_contract_tests.rs",
+          "src/geometry.rs",
+          "src/lib.rs",
+          "src/manifest.rs",
+          "src/migration_benchmarks.rs",
+          "src/mmcif.rs",
+          "src/model.rs",
+          "src/options.rs",
+          "src/pdb.rs",
+          "src/residue.rs",
+          "src/schema.rs",
+          "src/storage.rs",
+          "src/table_provider.rs",
+          "tests/policies.rs",
+          "tests/structures.rs"
+        ]
+      },
+      {
+        "name": "datafusion-bio-format-foldcomp",
+        "license": "Apache-2.0 AND MIT",
+        "package_files": [
+          ".cargo_vcs_info.json",
+          "Cargo.lock",
+          "Cargo.toml",
+          "Cargo.toml.orig",
+          "LICENSE-APACHE",
+          "NOTICE",
+          "README.md",
+          "examples/benchmark_structures.rs",
+          "src/codec.rs",
+          "src/codec_contract_tests.rs",
+          "src/codec_goldens.rs",
+          "src/fcz/LICENSE-FOLDCOMP",
+          "src/fcz/backbone.rs",
+          "src/fcz/bitstream.rs",
+          "src/fcz/decode.rs",
+          "src/fcz/discretize.rs",
+          "src/fcz/geometry.rs",
+          "src/fcz/header.rs",
+          "src/fcz/mod.rs",
+          "src/fcz/numeric.rs",
+          "src/fcz/residue.rs",
+          "src/fcz/tables.rs",
+          "src/fcz/tests.rs",
+          "src/index.rs",
+          "src/lib.rs",
+          "src/manifest.rs",
+          "src/migration_benchmarks.rs",
+          "tests/foldcomp.rs"
+        ]
+      }
+    ],
+    "distributions": [
+      {
+        "file": "polars_bio-0.35.1-cp310-abi3-macosx_11_0_arm64.whl",
+        "sha256": "39c1114b22c54cfaa7262e7e5da75fdf49bc334607f25b0ce997bce8706db52d",
+        "notices": {
+          "polars_bio/licenses/structure/FOLDCOMP-LICENSE.txt": "720761f8c3ce5c7a43655700b219b5746dff0ec8635b0eb3ff0ce6cc26d1ac55",
+          "polars_bio/licenses/structure/README.md": "77001181d912488d00c49d081b5638096088157b613706be593bcc61c7ec8591"
+        },
+        "codec_native_inputs": []
+      },
+      {
+        "file": "polars_bio-0.35.1.tar.gz",
+        "sha256": "f8bad63da4dd1bb9a226f8718044b43b8a4ac1fc4f69935fe1ae04afc0ec1758",
+        "notices": {
+          "polars_bio-0.35.1/polars_bio/licenses/structure/FOLDCOMP-LICENSE.txt": "720761f8c3ce5c7a43655700b219b5746dff0ec8635b0eb3ff0ce6cc26d1ac55",
+          "polars_bio-0.35.1/polars_bio/licenses/structure/README.md": "77001181d912488d00c49d081b5638096088157b613706be593bcc61c7ec8591"
+        },
+        "codec_native_inputs": []
+      }
+    ]
+  },
+  "extension_audit": {
+    "wheel": "polars_bio-0.35.1-cp310-abi3-macosx_11_0_arm64.whl",
+    "wheel_sha256": "39c1114b22c54cfaa7262e7e5da75fdf49bc334607f25b0ce997bce8706db52d",
+    "extension_sha256": "3537feb6b9e9c99d07e2f5f5ece2854703868adda886c92828a083ea65206ffe",
+    "codec_bridge_symbols": [],
+    "linked_libraries": [
+      "\t@rpath/polars_bio.abi3.so (compatibility version 0.0.0, current version 0.0.0)",
+      "\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1800.105.0)",
+      "\t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61439.60.117)",
+      "\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 3208.0.0)",
+      "\t/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)",
+      "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)"
+    ],
+    "remaining_cpp_runtime_dependency": "link-cplusplus <- snappy_src <- blosc-src <- zarrs <- datafusion-bio-format-vcf; unrelated to the removed structure codecs",
+    "sdist_pin_check": "Cargo.lock byte-identical; Cargo.toml identical except maturin-added README metadata"
+  },
+  "formats_checks": {
+    "workspace_default_tests": {
+      "passed": 1978,
+      "failed": 0,
+      "ignored": 14,
+      "suites": 126
+    },
+    "external_provider_reference_release_tests": {
+      "passed": 4,
+      "failed": 0
+    },
+    "standalone_full_array_probe": {
+      "cases": 769,
+      "coordinate_components": 159915,
+      "max_coordinate_drift": 0,
+      "max_bfactor_drift": 0
+    },
+    "feature_off_structure": "passed",
+    "text_formats_foldcomp": "passed",
+    "workspace_clippy_all_targets_all_features_deny_warnings": "passed",
+    "workspace_rustdoc_all_features_deny_warnings": "passed",
+    "formatting": "passed",
+    "ruff": "passed",
+    "openspec_strict": "passed",
+    "actionlint": "passed with only the outdated macos-15-intel label diagnostic excluded"
+  },
+  "log_sha256": {
+    "target/codec-cutover-workspace.log": "0cf4ece5bfcf58ecffc8db6194a5a34aa0eee345ac299bfb5edef0ddb1efa48f",
+    "target/codec-cutover-workspace-clippy.log": "9c80f0b5038b8e0bd559189066ef618ef560f515d6d0a5b2a1c5c141960e3256",
+    "target/codec-cutover-reference-release.log": "01c8114948fa5ffb40d07e5747e7262be5ee22c80954d3867d850d16a6be1c00",
+    "target/codec-cutover-rustdoc.log": "eb8096308a270a65e32443e1426751d22e4c35214c9f8490cd9074780dad048a"
+  },
+  "hosted_runs": [
+    {
+      "conclusion": "",
+      "headSha": "e021c7e5f9b8355eedb1753e0f28d8b8e909ccd4",
+      "jobs": [
+        {
+          "name": "external-oracles",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-readers (ubuntu-24.04-arm)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-readers (ubuntu-22.04)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-smoke (selected_range)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-readers (windows-2022)",
+          "status": "in_progress",
+          "conclusion": ""
+        },
+        {
+          "name": "rust-readers (macos-15-intel)",
+          "status": "in_progress",
+          "conclusion": ""
+        },
+        {
+          "name": "rust-fuzz-smoke (fcz_decode)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-smoke (cif_document)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-readers (macos-14)",
+          "status": "in_progress",
+          "conclusion": ""
+        }
+      ],
+      "status": "in_progress",
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35564262486",
+      "kind": "production readers/oracles/fuzz smoke"
+    },
+    {
+      "conclusion": "",
+      "headSha": "e021c7e5f9b8355eedb1753e0f28d8b8e909ccd4",
+      "jobs": [
+        {
+          "name": "consumer / installed-wheel (ubuntu-24.04-arm)",
+          "status": "in_progress",
+          "conclusion": ""
+        },
+        {
+          "name": "consumer / installed-wheel (macos-15-intel)",
+          "status": "in_progress",
+          "conclusion": ""
+        },
+        {
+          "name": "consumer / installed-wheel (ubuntu-22.04)",
+          "status": "in_progress",
+          "conclusion": ""
+        },
+        {
+          "name": "consumer / installed-wheel (macos-14)",
+          "status": "in_progress",
+          "conclusion": ""
+        },
+        {
+          "name": "consumer / installed-wheel (windows-2022)",
+          "status": "in_progress",
+          "conclusion": ""
+        }
+      ],
+      "status": "in_progress",
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35564264122",
+      "kind": "production installed wheels"
+    },
+    {
+      "conclusion": "",
+      "headSha": "7681a92c26d9748f588ef517b5036538aaebaeba",
+      "jobs": [
+        {
+          "name": "build-test",
+          "status": "queued",
+          "conclusion": ""
+        }
+      ],
+      "status": "queued",
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35565440662",
+      "kind": "full workspace after documentation fix"
+    },
+    {
+      "conclusion": "",
+      "headSha": "f96d1b0d82b709f161196c3b426f09bdc3d2b0f1",
+      "jobs": [
+        {
+          "name": "campaign-matrix",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (cif_document, 5)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (cif_document, 1)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (cif_document, 4)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (cif_document, 3)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (fcz_decode, 7)",
+          "status": "in_progress",
+          "conclusion": ""
+        },
+        {
+          "name": "rust-fuzz-campaign (fcz_decode, 0)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (fcz_decode, 2)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (cif_document, 2)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (cif_document, 7)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (cif_document, 6)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (fcz_decode, 4)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (fcz_decode, 6)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (fcz_decode, 3)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (fcz_decode, 1)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (fcz_decode, 5)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "rust-fuzz-campaign (cif_document, 0)",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ],
+      "status": "in_progress",
+      "url": "https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35519841823",
+      "kind": "pre-cutover sustained fuzz campaign"
+    }
+  ],
+  "remaining_acceptance": [
+    "Five-platform production wheel/reader and corrected full workspace hosted runs are not yet complete.",
+    "Sustained FCZ campaign final shard is retrying after a lost hosted runner; completed CIF/FCZ hours do not prove current-revision campaign acceptance.",
+    "Pre-cutover ARM64 release performance: 89/93 within budget, two isolated residue-to-Arrow regressions (1.194/1.187), two noisy cases; follow-up single-segment Arrow ratio 1.211. No threshold widened.",
+    "Optimized external-reference comparisons pass fixed tolerances; unoptimized debug arithmetic was observed to differ by up to 0.0005303 angstrom.",
+    "Unrelated native dependencies, including Snappy via VCF/Zarr, remain in the Python extension."
+  ]
+}

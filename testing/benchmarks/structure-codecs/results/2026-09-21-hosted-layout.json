@@ -1,0 +1,4694 @@
+{
+  "platform": "Linux-6.17.0-1022-azure-aarch64-with-glibc2.39",
+  "machine": "aarch64",
+  "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)",
+  "revision": "fe9c879b87e71b61f39c16d8cccd4f607b3f08eb",
+  "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "cargo_lock_sha256": "e611e975c17f24aac37416f5c368c9165e895364cb13d99d3a6cefbe0fe3577d",
+  "binaries": {
+    "structure": {
+      "sha256": "e8c44ade95ea742be0163e7243a98248d3d72b389eb5819db242a639a23c0e5b",
+      "path": "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/release/deps/datafusion_bio_format_structure-654ecd7e1fe2b449"
+    },
+    "foldcomp": {
+      "sha256": "682f37d65465ea6b700a57c1919ba54144786cf46683e36fedf9730856fe3cff",
+      "path": "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/target/release/deps/datafusion_bio_format_foldcomp-df698936402da375"
+    }
+  },
+  "samples": 9,
+  "calibration_seconds": 1.0,
+  "method": "alternating paired fresh processes; 2 untimed warmups; preloaded input; no cache flush; query uses shared EntrySource harness; complete materialization",
+  "threshold_ratio": 1.1,
+  "noise_limit_mad_ratio": 0.05,
+  "diagnostic_layout_inspection": true,
+  "inputs": {
+    "fcz_long_mixed": [
+      {
+        "file": "long_mixed.fcz",
+        "offset": 0,
+        "length": 15750,
+        "sha256": "e7c7cfdfd260d9df548aa3dda3749d926c3efb9abbf1220ea55d5c8409947d74"
+      }
+    ],
+    "fcz_long_segment": [
+      {
+        "file": "long_segment.fcz",
+        "offset": 0,
+        "length": 41146,
+        "sha256": "f3e6a7ae5e904b40a386f863a30966bd790423679067759cdef5caa278f45992"
+      }
+    ]
+  },
+  "results": [
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "arrow",
+      "level": "atom",
+      "workers": 1,
+      "iterations": 793,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9688975039999999,
+            "peak_rss_bytes": 43933696
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9585398540000001,
+            "peak_rss_bytes": 44195840
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9657827129999991,
+            "peak_rss_bytes": 43933696
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9614889480000001,
+            "peak_rss_bytes": 44064768
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9566190530000006,
+            "peak_rss_bytes": 44064768
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9417592060000007,
+            "peak_rss_bytes": 43794432
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9427995090000001,
+            "peak_rss_bytes": 44195840
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.939437934,
+            "peak_rss_bytes": 44064768
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 555
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9373112579999996,
+            "peak_rss_bytes": 43999232
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9416854859999997,
+            "peak_rss_bytes": 43388928
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9509295680000014,
+            "peak_rss_bytes": 43524096
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.955475982,
+            "peak_rss_bytes": 43528192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9305646800000008,
+            "peak_rss_bytes": 43532288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9584343629999986,
+            "peak_rss_bytes": 43401216
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9546889979999996,
+            "peak_rss_bytes": 43663360
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9380656089999997,
+            "peak_rss_bytes": 43663360
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.9383532169999992,
+            "peak_rss_bytes": 43659264
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12489750,
+            "iterations": 793,
+            "rows": 6887205,
+            "seconds": 0.930422280999999,
+            "peak_rss_bytes": 43663360
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0012063291967213123,
+          "mad_ratio": 0.01283525658567363,
+          "peak_rss_bytes": 44064768,
+          "rss_mad_ratio": 0.002974530581892545,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.001187497460277427,
+          "mad_ratio": 0.011809469472909362,
+          "peak_rss_bytes": 43532288,
+          "rss_mad_ratio": 0.0030109145652992097,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 0.9843892226971973,
+      "rust_native_rss_ratio": 0.9879159695110615,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "arrow",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 462,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9795065980000001,
+            "peak_rss_bytes": 44199936
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9704576730000009,
+            "peak_rss_bytes": 44068864
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9687883319999998,
+            "peak_rss_bytes": 44199936
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9711480280000002,
+            "peak_rss_bytes": 43937792
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9694966419999995,
+            "peak_rss_bytes": 44068864
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9721341749999993,
+            "peak_rss_bytes": 44191744
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9667314450000002,
+            "peak_rss_bytes": 44134400
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9654781620000001,
+            "peak_rss_bytes": 43986944
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9592626030000001,
+            "peak_rss_bytes": 44068864
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9738303179999999,
+            "peak_rss_bytes": 43532288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9789487160000009,
+            "peak_rss_bytes": 43405312
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9847378470000006,
+            "peak_rss_bytes": 43536384
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9665709090000001,
+            "peak_rss_bytes": 43536384
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9840427289999989,
+            "peak_rss_bytes": 43667456
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9783683499999991,
+            "peak_rss_bytes": 43655168
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9734086200000002,
+            "peak_rss_bytes": 43520000
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9831578370000006,
+            "peak_rss_bytes": 43667456
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7276500,
+            "iterations": 462,
+            "rows": 480480,
+            "seconds": 0.9752030720000002,
+            "peak_rss_bytes": 43532288
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.002098477580086579,
+          "mad_ratio": 0.0027205179324383127,
+          "peak_rss_bytes": 44068864,
+          "rss_mad_ratio": 0.0018589088205223534,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0021176804112554093,
+          "mad_ratio": 0.004895382194243513,
+          "peak_rss_bytes": 43536384,
+          "rss_mad_ratio": 0.00037632891146862355,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.0091508393280226,
+      "rust_native_rss_ratio": 0.9879170926666047,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "arrow_clone",
+      "level": "atom",
+      "workers": 1,
+      "iterations": 804,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9762057469999998,
+            "peak_rss_bytes": 48852992
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.949178024999999,
+            "peak_rss_bytes": 48861184
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9681895189999997,
+            "peak_rss_bytes": 48869376
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9508926060000001,
+            "peak_rss_bytes": 48869376
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9718464229999991,
+            "peak_rss_bytes": 48869376
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9519524119999992,
+            "peak_rss_bytes": 48861184
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9477600599999999,
+            "peak_rss_bytes": 48869376
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9729378790000011,
+            "peak_rss_bytes": 48869376
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9495967469999999,
+            "peak_rss_bytes": 48861184
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9663759260000008,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9669198080000002,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9624790120000002,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9672714399999991,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9712025409999989,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9658663159999993,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9655745500000011,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9750797789999998,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 12663000,
+            "iterations": 804,
+            "rows": 6982740,
+            "seconds": 0.9704745630000001,
+            "peak_rss_bytes": 46583808
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0011840204129353225,
+          "mad_ratio": 0.0044039512344859885,
+          "peak_rss_bytes": 48869376,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.001202636577114428,
+          "mad_ratio": 0.001391281871432099,
+          "peak_rss_bytes": 46600192,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.0157228405656908,
+      "rust_native_rss_ratio": 0.9535663397871093,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "arrow_clone",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 460,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9731717780000009,
+            "peak_rss_bytes": 48865280
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9722371739999999,
+            "peak_rss_bytes": 48857088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9732779939999993,
+            "peak_rss_bytes": 48873472
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9713226410000011,
+            "peak_rss_bytes": 48873472
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9845792469999999,
+            "peak_rss_bytes": 48873472
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9721339309999997,
+            "peak_rss_bytes": 48873472
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9782604469999999,
+            "peak_rss_bytes": 48857088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9712605029999998,
+            "peak_rss_bytes": 48873472
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 545
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9804695009999996,
+            "peak_rss_bytes": 48873472
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9779636960000001,
+            "peak_rss_bytes": 46600192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9732880219999995,
+            "peak_rss_bytes": 46604288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9843398280000002,
+            "peak_rss_bytes": 46604288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9710604419999999,
+            "peak_rss_bytes": 46604288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9844274729999993,
+            "peak_rss_bytes": 46596096
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9857903849999997,
+            "peak_rss_bytes": 46604288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9781522569999997,
+            "peak_rss_bytes": 46604288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9745369740000014,
+            "peak_rss_bytes": 46669824
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7245000,
+            "iterations": 460,
+            "rows": 478400,
+            "seconds": 0.9847753460000002,
+            "peak_rss_bytes": 46604288
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.002115590821739132,
+          "mad_ratio": 0.0019001136714012201,
+          "peak_rss_bytes": 48873472,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0021264179499999995,
+          "mad_ratio": 0.0063257749043873195,
+          "peak_rss_bytes": 46604288,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.0051177799362765,
+      "rust_native_rss_ratio": 0.953570231310761,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_mixed",
+      "stage": "residue",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 522,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9858852390000007,
+            "peak_rss_bytes": 44064768
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9757195760000007,
+            "peak_rss_bytes": 44199936
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9851739640000002,
+            "peak_rss_bytes": 44068864
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9858392510000001,
+            "peak_rss_bytes": 44068864
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9785633679999999,
+            "peak_rss_bytes": 44199936
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9795792380000001,
+            "peak_rss_bytes": 44068864
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9921126009999999,
+            "peak_rss_bytes": 44167168
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.988591376999999,
+            "peak_rss_bytes": 44199936
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 86850,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 86850,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 556
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9808520279999989,
+            "peak_rss_bytes": 43937792
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9857928220000013,
+            "peak_rss_bytes": 43270144
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9998973249999997,
+            "peak_rss_bytes": 43405312
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.989997074,
+            "peak_rss_bytes": 43520000
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9869753969999999,
+            "peak_rss_bytes": 43655168
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.983634792,
+            "peak_rss_bytes": 43536384
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9836637389999994,
+            "peak_rss_bytes": 43536384
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9834773110000006,
+            "peak_rss_bytes": 43470848
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9954147850000007,
+            "peak_rss_bytes": 43667456
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 8685,
+              "normalized_debug_hash": 16489271318255962110,
+              "string_capacities": {
+                "atom_id": 33660,
+                "atom_name": 16279,
+                "auth_asym_id": 8685,
+                "auth_atom_id": 16279,
+                "auth_comp_id": 26055,
+                "auth_seq_id": 25609,
+                "record_type": 34740,
+                "residue_name": 26055
+              },
+              "string_start_pages_4k": 546
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8221500,
+            "iterations": 522,
+            "rows": 542880,
+            "seconds": 0.9885994849999996,
+            "peak_rss_bytes": 43667456
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0018873064444444448,
+          "mad_ratio": 0.004386977486142007,
+          "peak_rss_bytes": 44068864,
+          "rss_mad_ratio": 0.002230690584626824,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0018907574655172411,
+          "mad_ratio": 0.003355360234983165,
+          "peak_rss_bytes": 43536384,
+          "rss_mad_ratio": 0.002728384608147521,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.0018285430450127,
+      "rust_native_rss_ratio": 0.9879170926666047,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "arrow",
+      "level": "atom",
+      "workers": 1,
+      "iterations": 436,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9442997560000005,
+            "peak_rss_bytes": 57860096
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9513813260000001,
+            "peak_rss_bytes": 57774080
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9679420189999997,
+            "peak_rss_bytes": 57847808
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.950898266,
+            "peak_rss_bytes": 57851904
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9777389489999998,
+            "peak_rss_bytes": 57860096
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9807998990000004,
+            "peak_rss_bytes": 57774080
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9618934229999996,
+            "peak_rss_bytes": 57860096
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9524484299999998,
+            "peak_rss_bytes": 57860096
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1030
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9605111900000008,
+            "peak_rss_bytes": 57860096
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.943826417000001,
+            "peak_rss_bytes": 55885824
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9428342640000004,
+            "peak_rss_bytes": 55885824
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9525648490000007,
+            "peak_rss_bytes": 56000512
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9542997589999995,
+            "peak_rss_bytes": 55885824
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9662553470000003,
+            "peak_rss_bytes": 56008704
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9490189259999997,
+            "peak_rss_bytes": 56004608
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9455900010000005,
+            "peak_rss_bytes": 55754752
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.9473415919999997,
+            "peak_rss_bytes": 56016896
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 17939656,
+            "iterations": 436,
+            "rows": 7143424,
+            "seconds": 0.977206506,
+            "peak_rss_bytes": 55885824
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.0022030073165137634,
+          "mad_ratio": 0.009505213572785937,
+          "peak_rss_bytes": 57860096,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.002176648912844036,
+          "mad_ratio": 0.005471449364960895,
+          "peak_rss_bytes": 55885824,
+          "rss_mad_ratio": 0.0020521841102316037,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 0.9880352627646105,
+      "rust_native_rss_ratio": 0.9658785218745576,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "arrow",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 175,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9826906869999998,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9709337570000001,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9808648990000001,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9696409739999998,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9832343540000003,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9676946519999998,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9802667260000004,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9662634409999997,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9710768610000006,
+            "peak_rss_bytes": 57868288
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9862290949999998,
+            "peak_rss_bytes": 56025088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9890994810000003,
+            "peak_rss_bytes": 55881728
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.986866265,
+            "peak_rss_bytes": 55894016
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9694836030000005,
+            "peak_rss_bytes": 56025088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9846211429999998,
+            "peak_rss_bytes": 55894016
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9841323169999999,
+            "peak_rss_bytes": 56025088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9829593690000001,
+            "peak_rss_bytes": 55894016
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9754498669999998,
+            "peak_rss_bytes": 56025088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7200550,
+            "iterations": 175,
+            "rows": 716800,
+            "seconds": 0.9875781450000004,
+            "peak_rss_bytes": 55619584
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.005549010634285718,
+          "mad_ratio": 0.004956785804827137,
+          "peak_rss_bytes": 57868288,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.00562640653142857,
+          "mad_ratio": 0.0022801886958872548,
+          "peak_rss_bytes": 55894016,
+          "rss_mad_ratio": 0.0023450095266012018,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.013947693065255,
+      "rust_native_rss_ratio": 0.9658833522083805,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "arrow_clone",
+      "level": "atom",
+      "workers": 1,
+      "iterations": 442,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9952330919999993,
+            "peak_rss_bytes": 61530112
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9674949339999999,
+            "peak_rss_bytes": 61530112
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9862045449999998,
+            "peak_rss_bytes": 61530112
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9889593450000005,
+            "peak_rss_bytes": 61526016
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9879792560000015,
+            "peak_rss_bytes": 61530112
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9951560330000008,
+            "peak_rss_bytes": 61530112
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9695624510000002,
+            "peak_rss_bytes": 61517824
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9577618099999996,
+            "peak_rss_bytes": 61530112
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.968509687000001,
+            "peak_rss_bytes": 61530112
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9836058659999991,
+            "peak_rss_bytes": 61599744
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9890098130000006,
+            "peak_rss_bytes": 61599744
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9595844070000001,
+            "peak_rss_bytes": 61599744
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9638423230000002,
+            "peak_rss_bytes": 61599744
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9856697249999989,
+            "peak_rss_bytes": 61534208
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9911678670000006,
+            "peak_rss_bytes": 61599744
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9501728020000001,
+            "peak_rss_bytes": 61591552
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9522875419999999,
+            "peak_rss_bytes": 61599744
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 18186532,
+            "iterations": 442,
+            "rows": 7241728,
+            "seconds": 0.9800579909999998,
+            "peak_rss_bytes": 61591552
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.002231232002262443,
+          "mad_ratio": 0.009154842213791954,
+          "peak_rss_bytes": 61530112,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.0022173257714932122,
+          "mad_ratio": 0.011335937364956162,
+          "peak_rss_bytes": 61599744,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 0.9937674653486819,
+      "rust_native_rss_ratio": 1.0011316735454667,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "arrow_clone",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 174,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9756658509999997,
+            "peak_rss_bytes": 61538304
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.993166875,
+            "peak_rss_bytes": 61538304
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 1.0199486460000005,
+            "peak_rss_bytes": 61538304
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9669012510000002,
+            "peak_rss_bytes": 61538304
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9743600179999999,
+            "peak_rss_bytes": 61538304
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9827947250000001,
+            "peak_rss_bytes": 61534208
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9753945199999998,
+            "peak_rss_bytes": 61538304
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9690908190000005,
+            "peak_rss_bytes": 61538304
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1026
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9881882360000003,
+            "peak_rss_bytes": 61538304
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9674582860000005,
+            "peak_rss_bytes": 61603840
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9845942799999995,
+            "peak_rss_bytes": 61603840
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.987960856,
+            "peak_rss_bytes": 61595648
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9906182600000001,
+            "peak_rss_bytes": 61603840
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9799213979999998,
+            "peak_rss_bytes": 61591552
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9734676849999997,
+            "peak_rss_bytes": 61603840
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.976200172,
+            "peak_rss_bytes": 61595648
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9933901979999996,
+            "peak_rss_bytes": 61599744
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1027
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 7159404,
+            "iterations": 174,
+            "rows": 712704,
+            "seconds": 0.9784351859999999,
+            "peak_rss_bytes": 61603840
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.005607275005747125,
+          "mad_ratio": 0.007306675736056267,
+          "peak_rss_bytes": 61538304,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.005631732172413792,
+          "mad_ratio": 0.006585949662056643,
+          "peak_rss_bytes": 61603840,
+          "rss_mad_ratio": 0.0,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.0043616848900045,
+      "rust_native_rss_ratio": 1.0010649627263046,
+      "status": "within_local_budget"
+    },
+    {
+      "dataset": "fcz_long_segment",
+      "stage": "residue",
+      "level": "residue",
+      "workers": 1,
+      "iterations": 209,
+      "copies": 1,
+      "samples": {
+        "native": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9934819880000004,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9912780839999998,
+            "peak_rss_bytes": 57856000
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9928581490000006,
+            "peak_rss_bytes": 57802752
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.993812795999999,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9987623559999995,
+            "peak_rss_bytes": 57864192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 1.0007828410000001,
+            "peak_rss_bytes": 57864192
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9983986859999999,
+            "peak_rss_bytes": 57868288
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9904005149999998,
+            "peak_rss_bytes": 57847808
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 163840,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 163840,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1031
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 1.0106763289999992,
+            "peak_rss_bytes": 57860096
+          }
+        ],
+        "rust": [
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9867272079999995,
+            "peak_rss_bytes": 56025088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 1.003846215,
+            "peak_rss_bytes": 55828480
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 1.0057861039999998,
+            "peak_rss_bytes": 55894016
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 1.0101568130000005,
+            "peak_rss_bytes": 55889920
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9961906909999996,
+            "peak_rss_bytes": 56025088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 0.9903845570000006,
+            "peak_rss_bytes": 56025088
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 1.0134656130000006,
+            "peak_rss_bytes": 55894016
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 1.0114306249999998,
+            "peak_rss_bytes": 55894016
+          },
+          {
+            "allocation_layout": {
+              "atom_capacity": 16384,
+              "normalized_debug_hash": 9803900139646068858,
+              "string_capacities": {
+                "atom_id": 70850,
+                "atom_name": 20480,
+                "auth_asym_id": 16384,
+                "auth_atom_id": 20480,
+                "auth_comp_id": 49152,
+                "auth_seq_id": 61156,
+                "record_type": 65536,
+                "residue_name": 49152
+              },
+              "string_start_pages_4k": 1025
+            },
+            "decode_calls": 0,
+            "first_batch_seconds": 0.0,
+            "input_bytes": 8599514,
+            "iterations": 209,
+            "rows": 856064,
+            "seconds": 1.00436224,
+            "peak_rss_bytes": 55894016
+          }
+        ]
+      },
+      "medians": {
+        "native": {
+          "seconds": 0.004755085148325355,
+          "mad_ratio": 0.0034335249191128777,
+          "peak_rss_bytes": 57864192,
+          "rss_mad_ratio": 7.078643731860976e-05,
+          "first_batch_seconds": 0.0
+        },
+        "rust": {
+          "seconds": 0.004805560956937799,
+          "mad_ratio": 0.007037684929293722,
+          "peak_rss_bytes": 55894016,
+          "rss_mad_ratio": 7.328154770628756e-05,
+          "first_batch_seconds": 0.0
+        }
+      },
+      "rust_native_time_ratio": 1.0106151219248347,
+      "rust_native_rss_ratio": 0.9659517236497487,
+      "status": "within_local_budget"
+    }
+  ]
+}
