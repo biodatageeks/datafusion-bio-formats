@@ -1,8 +1,5 @@
 //! Raw mmCIF categories preserve label/auth namespaces and quoted missing tokens.
-#[cfg(test)]
 use crate::cif::{CategoryBlock, Document};
-#[cfg(not(test))]
-use crate::native_cif::{CategoryBlock, Document};
 use crate::{
     error,
     model::{Atom, NormalizedEntry},
@@ -259,13 +256,13 @@ fn decode(
     Ok(Some(entry))
 }
 
-/// Retain native mapping comparisons while unit-test providers use Rust.
+/// Compare mapping with the separately executed, pinned legacy parser.
 #[cfg(test)]
-pub(crate) fn parse_native_reference(
+pub(crate) fn parse_external_reference(
     data: &[u8],
     options: &StructureOptions,
 ) -> Result<Vec<NormalizedEntry>> {
-    let document = crate::native_cif::Document::parse(data)?;
+    let document = crate::reference_cif::Document::parse(data)?;
     let mut entries = Vec::new();
     for index in 0..document.block_count() {
         let view = document.block(index)?;

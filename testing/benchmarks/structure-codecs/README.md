@@ -7,12 +7,14 @@ python3 testing/benchmarks/structure-codecs/run.py \
   --output target/codec-benchmark-release.json --samples 9 --seconds 0.2
 ```
 
-The driver builds the two release unit-test binaries once. The ignored
-`migration_benchmarks::worker` test selects its backend from an explicit benchmark
-configuration. This selection is confined to tests; no production flag or fallback
-is added. Both backends run from the same executable, with the same inputs,
-options, schema, copies, worker count and materialization. Two untimed rounds warm
-code/allocators in each fresh process. Backend order alternates by sample pair.
+The driver builds current Rust release workers and separate native workers from
+immutable historical commit `fe9c879b87e71b61f39c16d8cccd4f607b3f08eb`, extracted
+under ignored `target/codec-benchmark-baseline/`. Only that development reference
+build needs C++; current reader crates contain no native build scripts or FFI.
+The backends use the same inputs, options, schemas, copies, worker counts and
+complete materialization. Toolchain, lock and binary provenance are retained.
+Two untimed rounds warm code/allocators per fresh process; backend order alternates.
+Historical reports preceding cutover used both backends in one test executable.
 
 Frozen local protocol:
 
@@ -45,7 +47,8 @@ performance gate.
 The output retains all samples, iteration counts, input/binary hashes, dependency
 lock hash, platform/toolchain, medians, noise estimates and local budget flags.
 `--datasets` and `--stages` restrict a diagnostic run; do not present those subsets
-as a full acceptance run. Optional binary paths avoid rebuilding; both are required.
+as a full acceptance run. Optional binary paths avoid rebuilding; provide all four `--structure-bin`,
+`--foldcomp-bin`, `--native-structure-bin` and `--native-foldcomp-bin` paths.
 Run performance measurements without concurrent builds/fuzz campaigns.
 
 For a native hosted Linux ARM64 follow-up, dispatch:

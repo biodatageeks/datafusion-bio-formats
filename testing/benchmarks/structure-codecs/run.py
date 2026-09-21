@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import io
 import json
 import math
 import os
@@ -11,19 +12,21 @@ import platform
 import re
 import statistics
 import subprocess
+import tarfile
 import tempfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 DATA = ROOT / "testing/data/structure"
 STRESS = ROOT / "testing/oracles/structure-codecs/fcz-stress"
+BASELINE = "fe9c879b87e71b61f39c16d8cccd4f607b3f08eb"
 
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def build(env):
+def build(env, root=ROOT):
     command = [
         "cargo",
         "test",
@@ -36,7 +39,7 @@ def build(env):
         "-p",
         "datafusion-bio-format-foldcomp",
     ]
-    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+    result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(result.stdout + result.stderr)
     binaries = {}
@@ -51,6 +54,26 @@ def build(env):
             f"missing benchmark binaries: {result.stdout}\n{result.stderr}"
         )
     return binaries
+
+
+def build_pair(env):
+    """Build Rust here and the native worker only from a pinned historical checkout."""
+    root = ROOT / "target/codec-benchmark-baseline" / BASELINE
+    marker = root / ".benchmark-source-revision"
+    if not marker.is_file():
+        root.mkdir(parents=True, exist_ok=True)
+        archive = subprocess.check_output(["git", "archive", BASELINE], cwd=ROOT)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+            source.extractall(root, filter="data")
+        marker.write_text(BASELINE + "\n")
+    shared = {
+        **env,
+        "CARGO_TARGET_DIR": str(
+            Path(env.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
+        ),
+    }
+    native = build(shared, root=root)
+    return {"native": native, "rust": build(shared)}
 
 
 def datasets(directory):
@@ -154,19 +177,33 @@ def main():
     )
     parser.add_argument("--structure-bin", type=Path)
     parser.add_argument("--foldcomp-bin", type=Path)
+    parser.add_argument("--native-structure-bin", type=Path)
+    parser.add_argument("--native-foldcomp-bin", type=Path)
     args = parser.parse_args()
     if args.samples < 3 or args.seconds <= 0:
         parser.error("at least three samples and positive seconds are required")
-    if bool(args.structure_bin) != bool(args.foldcomp_bin):
-        parser.error("supply both binaries or neither")
+    provided = [
+        args.structure_bin,
+        args.foldcomp_bin,
+        args.native_structure_bin,
+        args.native_foldcomp_bin,
+    ]
+    if any(provided) and not all(provided):
+        parser.error("supply all four Rust/native binaries or none")
     env = {**os.environ, "CARGO_PROFILE_RELEASE_DEBUG": "0"}
     binaries = (
         {
-            "structure": str(args.structure_bin.resolve()),
-            "foldcomp": str(args.foldcomp_bin.resolve()),
+            "rust": {
+                "structure": str(args.structure_bin.resolve()),
+                "foldcomp": str(args.foldcomp_bin.resolve()),
+            },
+            "native": {
+                "structure": str(args.native_structure_bin.resolve()),
+                "foldcomp": str(args.native_foldcomp_bin.resolve()),
+            },
         }
-        if args.structure_bin
-        else build(env)
+        if all(provided)
+        else build_pair(env)
     )
     metadata = {
         "platform": platform.platform(),
@@ -181,9 +218,13 @@ def main():
             subprocess.check_output(["git", "diff", "HEAD"], cwd=ROOT)
         ),
         "cargo_lock_sha256": digest((ROOT / "Cargo.lock").read_bytes()),
+        "native_baseline_revision": BASELINE,
         "binaries": {
-            kind: {"sha256": digest(Path(path).read_bytes()), "path": path}
-            for kind, path in binaries.items()
+            backend: {
+                kind: {"sha256": digest(Path(path).read_bytes()), "path": path}
+                for kind, path in entries.items()
+            }
+            for backend, entries in binaries.items()
         },
         "samples": args.samples,
         "calibration_seconds": args.seconds,
@@ -239,7 +280,9 @@ def main():
                             "backend": "native",
                             "inspect_layout": args.inspect_layout,
                         }
-                        trial = measure(binaries[kind], config, directory, env)
+                        trial = measure(
+                            binaries["native"][kind], config, directory, env
+                        )
                         config["iterations"] = max(
                             1, min(10000, math.ceil(args.seconds / trial["seconds"]))
                         )
@@ -253,7 +296,7 @@ def main():
                             for backend in order:
                                 samples[backend].append(
                                     measure(
-                                        binaries[kind],
+                                        binaries[backend][kind],
                                         {**config, "backend": backend},
                                         directory,
                                         env,

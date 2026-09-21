@@ -1,7 +1,7 @@
 # Structure codec robustness and platform probes
 
 This unpublished, separate workspace compiles the **same source files** as the
-Rust CIF/FCZ candidates and shared atom normalization. Its only substitute is the
+production Rust CIF/FCZ codecs and shared atom normalization. Its only substitute is the
 error carrier (`std::io::Error` instead of `DataFusionError`). Parser control flow,
 geometry, limits, normalization and data structures are not reimplemented.
 No native CIF/Foldcomp code is linked into the fuzz targets. The production crate
@@ -38,7 +38,7 @@ three little-endian u64 values (previous key, file length, input limit), then a
 UTF-8 index row. Range validation stays conditional on selection in production,
 so malformed unselected payload ranges remain irrelevant.
 
-These are smoke runs. The pre-cutover budget remains **at least 24 CPU hours per
+These are smoke runs. The sustained acceptance budget remains **at least 24 CPU hours per
 decoder target**; do not count wall time, compilation or index-target CPU toward
 that requirement. Longer campaigns can use `--target cif_document --seconds
 86400` or `--target fcz_decode --seconds 86400`; inspect actual execution/CPU

@@ -31,7 +31,7 @@ jobs:
   consumer:
     if: github.event_name == 'workflow_dispatch' && inputs.consumer_validation
     uses: ./.github/workflows/structure-codecs-consumer.yml
-  native:
+  rust-readers:
     if: github.event_name != 'workflow_dispatch' || (inputs.fuzz_cpu_seconds == 0 && !inputs.consumer_validation && !inputs.performance_validation)
     strategy:
       fail-fast: false
@@ -55,7 +55,7 @@ jobs:
         if: runner.os == 'Windows'
       - name: Build source-identical Rust candidate
         run: cargo build --locked --manifest-path testing/fuzz/structure-codecs/Cargo.toml --release --no-default-features --features probe --bin codec_probe
-      - name: Compare candidate with pinned native process
+      - name: Compare Rust codecs with pinned external process
         shell: python
         env:
           CXX: ${{ runner.os == 'Windows' && 'cl' || 'c++' }}
@@ -71,6 +71,10 @@ jobs:
               "--candidate", probe, "--output", "target/codec-platform-comparison.json",
               "--label", "${{ matrix.os }}",
           ], check=True)
+      - name: Compare provider mapping with the external legacy process
+        env:
+          CXX: ${{ runner.os == 'Windows' && 'cl' || 'c++' }}
+        run: python testing/oracles/structure-codecs/check_provider_reference.py
       - name: Retain platform observations
         if: always()
         uses: actions/upload-artifact@v4
@@ -83,7 +87,7 @@ jobs:
       - run: cargo test -p datafusion-bio-format-foldcomp --features text-formats
       - run: cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --release --lib
       - run: cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings
-  oracles-and-sanitizers:
+  external-oracles:
     if: github.event_name != 'workflow_dispatch' || (inputs.fuzz_cpu_seconds == 0 && !inputs.consumer_validation && !inputs.performance_validation)
     runs-on: ubuntu-22.04
     steps:
@@ -93,7 +97,6 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -r testing/oracles/structure/requirements.txt
       - run: python testing/oracles/structure/generate.py --check
-      - run: bash testing/native/check-codec.sh
 
   rust-fuzz-smoke:
     if: github.event_name != 'workflow_dispatch' || (inputs.fuzz_cpu_seconds == 0 && !inputs.consumer_validation && !inputs.performance_validation)

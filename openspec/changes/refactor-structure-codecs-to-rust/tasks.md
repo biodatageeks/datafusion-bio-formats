@@ -3,7 +3,9 @@
 The design defines stage gates and the immutable baseline. Completed local
 work is checked below; [IMPLEMENTATION.md](IMPLEMENTATION.md) records measured
 evidence and [BASELINE.md](BASELINE.md) records the concrete contract/design.
-Baseline characterization is complete; production replacement stages remain open.
+Both production readers now use Rust following the explicit 2026-09-21 cutover
+instruction. Remaining performance/fuzz/platform delivery checks stay tracked
+separately; the switch does not imply those checks passed.
 
 ## R0. Freeze the contract and internal Rust design
 
@@ -23,12 +25,11 @@ Gate: reproducible baseline, concrete internal module designs and explicit accep
 - [x] R1.2 Implement quoted/multiline values, loops/scalars, case-insensitive tags, multiple blocks, comments, syntax errors and measured baseline extensions.
 - [x] R1.3 Adapt `mmcif::Blocks` and category views while retaining the existing identifier, metadata, atom and residue mapping.
 - [x] R1.4 Pass raw-parser differential tests, existing structure/policy tests, metadata-after-atoms cases and independent numerical/identity checks.
-- [ ] R1.5 Verify feature-off/shared-model builds, input limits, contextual errors and resource release; switch production mmCIF parsing only after its gate passes.
-- [ ] R1.6 Remove the Gemmi bridge/vendor build and unused direct build dependency; update source/provenance documentation without discarding applicable notices.
+- [x] R1.5 Verify feature-off/shared-model builds, input limits, contextual errors and resource release; switch production mmCIF parsing under the explicit cutover instruction.
+- [x] R1.6 Remove the Gemmi bridge/vendor build and unused direct build dependency; update source/provenance documentation without discarding applicable notices.
 
-R1.3/R1.4 are verified in the candidate configuration: unit-test providers use
-Rust `Blocks`, while ordinary builds retain native parsing until R1.5/R1.6.
-The same provider suite runs against both configurations, including block-at-a-time
+R1.3/R1.4 now apply to both ordinary and unit-test builds using Rust `Blocks`.
+The provider suite and separate pinned reference comparisons cover block-at-a-time
 errors, input limits, identifiers, metadata, Arrow mapping and independent geometry.
 
 ## R2. Parse FCZ bytes safely
@@ -45,13 +46,12 @@ errors, input limits, identifiers, metadata, Arrow mapping and independent geome
 - [x] R3.3 Port residue tables and full side-chain reconstruction with attribution; preserve unknown-residue behavior, atom ordering, OXT, numbering, chain and B factors.
 - [x] R3.4 Return the existing `NormalizedEntry` through `codec::decode`; retain common Float64 widening, normalization and residue/geometry behavior.
 - [x] R3.5 Pass full decoded-array parity, coordinate/angle/null/connectivity gates and all database selector tests, including zero/K decode counts and corrupt unselected records.
-- [ ] R3.6 Switch the production codec after acceptance and remove the Foldcomp FFI/bridge/vendor build; preserve applicable translated-code and fixture notices.
+- [x] R3.6 Switch the production codec under the explicit cutover instruction and remove the Foldcomp FFI/bridge/vendor build; preserve applicable translated-code and fixture notices.
 
-R3.2–R3.5 are verified locally with test-only Rust provider routing. Coverage
+R3.2–R3.5 are verified locally with Rust production routing. Coverage
 includes the frozen small corpus, all 24 database records, 1,040-/4,096-residue
-stress fixtures, all residue tables, selectors and decode-count metrics. The
-production switch remains gated by R0.7/R4; these checkmarks do not claim platform,
-sustained fuzz, release-performance or wheel acceptance.
+stress fixtures, all residue tables, selectors and decode-count metrics. These
+checkmarks do not claim sustained fuzz, release-performance or final wheel acceptance.
 
 ## R4. Harden and validate both production paths
 
@@ -60,7 +60,7 @@ sustained fuzz, release-performance or wheel acceptance.
 - [ ] R4.3 Compare release performance and peak RSS on representative parse/decode, Arrow/residue, query and subset workloads using equal work and frozen inputs.
 - [ ] R4.4 Validate Linux x86_64/arm64, macOS x86_64/arm64 and Windows x64, plus structure/Foldcomp feature combinations and all required workspace checks.
 - [ ] R4.5 Audit package/build artifacts for removed C++ sources, build invocations and bridge symbols; retain external reference execution separately from production.
-- [ ] R4.6 Update `.github/workflows/structures.yml` for Rust robustness checks and retained independent oracles; retire obsolete C++ sanitizer jobs only after replacement coverage exists.
+- [x] R4.6 Update `.github/workflows/structures.yml` for Rust robustness checks and retained independent oracles; retire obsolete C++ sanitizer jobs only after replacement coverage exists.
 
 R4 now has source-identical ASan/libFuzzer targets, separate-process comparisons
 on all five targets, 93-case paired release measurements on macOS/Linux, and a
@@ -68,7 +68,8 @@ five-platform CI matrix. R0.7 freezes the baseline and budgets; it does not clai
 that noisy or regressing benchmark cases passed their R4 acceptance gate.
 These tasks stay open: smoke runs do not meet the 24-CPU-hour decoder budgets,
 the isolated Arrow regression and some benchmark cases remain unresolved,
-and native production paths have not been retired. See the latest checkpoint
+while the production paths and native build inputs have now been replaced at
+the user's explicit instruction. See the latest checkpoint
 in [IMPLEMENTATION.md](IMPLEMENTATION.md) for evidence and scope.
 
 ## R5. Integrate polars-bio and prepare release

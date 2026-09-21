@@ -1,5 +1,5 @@
 //! Frozen observations exercised against the retained and candidate parsers.
-use crate::{cif, native_cif};
+use crate::cif;
 use datafusion::common::Result;
 use serde_json::{Value, json};
 
@@ -58,42 +58,17 @@ fn lexical_boundaries_match_pinned_contract() {
 
 fn check_case(name: &str, data: &[u8], expected: &Value) {
     // Outer Result is syntax parsing; inner Result is block/UTF-8 exposure.
-    type Snapshot = fn(&[u8]) -> Result<Result<Vec<Value>>>;
-    for (backend, parse) in [
-        ("native", native_snapshot as Snapshot),
-        ("rust", rust_snapshot as Snapshot),
-    ] {
-        let parsed = parse(data);
-        if expected["status"] == "error" && expected["stage"] == "parse" {
-            assert!(
-                parsed.is_err(),
-                "{backend} {name}: accepted invalid CIF syntax"
-            );
-            continue;
-        }
-        let blocks = parsed.unwrap_or_else(|error| panic!("{backend} {name}: {error}"));
-        if expected["status"] == "error" {
-            assert!(blocks.is_err(), "{backend} {name}: exposed invalid UTF-8");
-        } else {
-            assert_eq!(
-                json!(blocks.unwrap()),
-                expected["blocks"],
-                "{backend} {name}"
-            );
-        }
+    let parsed = rust_snapshot(data);
+    if expected["status"] == "error" && expected["stage"] == "parse" {
+        assert!(parsed.is_err(), "{name}: accepted invalid CIF syntax");
+        return;
     }
-}
-
-fn native_snapshot(data: &[u8]) -> Result<Result<Vec<Value>>> {
-    let document = native_cif::Document::parse(data)?;
-    assert!(document.block(document.block_count()).is_err());
-    Ok((0..document.block_count())
-        .map(|index| {
-            document
-                .block(index)
-                .map(|block| json!({"name": block.name, "columns": block.columns}))
-        })
-        .collect())
+    let blocks = parsed.unwrap_or_else(|error| panic!("{name}: {error}"));
+    if expected["status"] == "error" {
+        assert!(blocks.is_err(), "{name}: exposed invalid UTF-8");
+    } else {
+        assert_eq!(json!(blocks.unwrap()), expected["blocks"], "{name}");
+    }
 }
 
 fn rust_snapshot(data: &[u8]) -> Result<Result<Vec<Value>>> {

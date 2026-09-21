@@ -45,8 +45,11 @@ def main():
         (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
         return
     env = {**os.environ, "CARGO_PROFILE_RELEASE_DEBUG": "0"}
-    binary = benchmark.build(env)["foldcomp"]
-    report["binary_sha256"] = benchmark.digest(Path(binary).read_bytes())
+    binaries = benchmark.build_pair(env)
+    report["binary_sha256"] = {
+        backend: benchmark.digest(Path(values["foldcomp"]).read_bytes())
+        for backend, values in binaries.items()
+    }
     report["revision"] = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=benchmark.ROOT, text=True
     ).strip()
@@ -63,11 +66,14 @@ def main():
                 "inputs": inputs,
                 "backend": "native",
             }
-            trial = benchmark.measure(binary, config, directory, env)
+            trial = benchmark.measure(
+                binaries["native"]["foldcomp"], config, directory, env
+            )
             config["iterations"] = max(
                 1, min(100000, math.ceil(args.seconds * 100 / trial["seconds"]))
             )
             for backend in ["native", "rust"]:
+                binary = binaries[backend]["foldcomp"]
                 name = f"{stage}-{backend}"
                 config_path = output / f"{name}.json"
                 config_path.write_text(json.dumps({**config, "backend": backend}))

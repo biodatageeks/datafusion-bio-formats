@@ -3,10 +3,15 @@
 pub mod codec;
 #[cfg(test)]
 mod codec_goldens;
-#[cfg(test)]
 mod fcz;
 mod index;
 mod manifest;
+#[cfg(test)]
+#[path = "../../../testing/oracles/structure-codecs/reference_foldcomp.rs"]
+mod reference_foldcomp;
+#[cfg(test)]
+#[path = "../../../testing/oracles/structure-codecs/reference_process.rs"]
+mod reference_process;
 use async_trait::async_trait;
 use datafusion::{
     arrow::datatypes::SchemaRef,

@@ -2,7 +2,7 @@
 name = "datafusion-bio-format-foldcomp"
 version = "0.1.0"
 description = "Protein foldcomp atom and residue table providers for DataFusion"
-license.workspace = true
+license = "Apache-2.0 AND MIT"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -13,9 +13,6 @@ datafusion.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 datafusion-bio-format-core = { path = "../bio-format-core", version = "1.12.1" }
-
-[build-dependencies]
-cc = "1"
 
 [dev-dependencies]
 tokio.workspace = true

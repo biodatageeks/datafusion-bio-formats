@@ -243,7 +243,8 @@ fn inverse_discretization_reproduces_measured_reference_contraction() {
 }
 
 #[test]
-fn reconstructed_database_atoms_match_native() {
+#[ignore = "requires separately built pinned reference; run check_provider_reference.py"]
+fn external_reference_reconstructed_database_atoms_match() {
     use datafusion_bio_format_structure::StructureOptions;
     let database = include_bytes!("../../../../testing/data/structure/example_db");
     let index = include_str!("../../../../testing/data/structure/example_db.index");
@@ -259,7 +260,7 @@ fn reconstructed_database_atoms_match_native() {
             panic!("invalid index")
         };
         let data = &database[offset..offset + size - 1];
-        let expected = crate::codec::decode_native(data, &options).unwrap();
+        let expected = crate::reference_foldcomp::decode(data, &options).unwrap();
         let actual = super::decode(data, &options).unwrap();
         assert_eq!(actual.entry_id, expected.entry_id, "key {key}");
         assert_eq!(actual.atoms.len(), expected.atoms.len(), "key {key}");
@@ -349,7 +350,6 @@ fn reconstruction_rejects_degenerate_and_overflowing_geometry_without_panicking(
             data[coordinates + i * 4..coordinates + i * 4 + 4]
                 .copy_from_slice(&value.to_le_bytes());
         }
-        assert!(crate::codec::decode_native(&data, &options).is_err());
         assert!(super::decode(&data, &options).is_err());
     }
     for offset in [
@@ -360,9 +360,7 @@ fn reconstruction_rejects_degenerate_and_overflowing_geometry_without_panicking(
     ] {
         let mut data = original.to_vec();
         data[offset..offset + 4].copy_from_slice(&f32::MAX.to_le_bytes());
-        let native = crate::codec::decode_native(&data, &options);
         let rust = super::decode(&data, &options);
-        assert_eq!(rust.is_err(), native.is_err(), "extreme field at {offset}");
         // A large finite angular minimum may still give finite trigonometry;
         // a factor that overflows restored angles/B factors must be rejected.
         if offset == 52 || offset == original.len() - encoded.bfactors().len() - 4 {
@@ -391,7 +389,8 @@ fn reconstruction_rejects_degenerate_and_overflowing_geometry_without_panicking(
 }
 
 #[test]
-fn long_chains_and_many_anchor_joins_match_native() {
+#[ignore = "requires separately built pinned reference; run check_provider_reference.py"]
+fn external_reference_long_chains_and_many_anchor_joins_match() {
     use datafusion_bio_format_structure::{StructureOptions, residue::residues};
     let options = StructureOptions::default();
     let cases: [(&str, &[u8], usize); 2] = [
@@ -411,7 +410,7 @@ fn long_chains_and_many_anchor_joins_match_native() {
         ),
     ];
     for (name, data, residue_count) in cases {
-        let expected = crate::codec::decode_native(data, &options).unwrap();
+        let expected = crate::reference_foldcomp::decode(data, &options).unwrap();
         let actual = super::decode(data, &options).unwrap();
         assert_eq!(
             EncodedEntry::parse(data, options.max_atoms)
@@ -460,5 +459,45 @@ fn long_chains_and_many_anchor_joins_match_native() {
                 }
             }
         }
+    }
+}
+
+#[test]
+#[ignore = "requires separately built pinned reference; run check_provider_reference.py"]
+fn external_reference_degenerate_and_extreme_geometry() {
+    use datafusion_bio_format_structure::StructureOptions;
+    let original = include_bytes!("../../../../testing/data/structure/1ubq.fcz");
+    let options = StructureOptions {
+        max_atoms: 10_000,
+        ..Default::default()
+    };
+    let encoded = EncodedEntry::parse(original, options.max_atoms).unwrap();
+    let coordinates = 76 + 4 * encoded.anchors().len() + encoded.title_bytes().len();
+    let mut cases = Vec::new();
+    for points in [
+        [[0.0f32; 3]; 3],
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+    ] {
+        let mut data = original.to_vec();
+        for (i, value) in points.into_iter().flatten().enumerate() {
+            data[coordinates + i * 4..coordinates + i * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        cases.push(data);
+    }
+    for offset in [
+        28,
+        52,
+        coordinates,
+        original.len() - encoded.bfactors().len() - 4,
+    ] {
+        let mut data = original.to_vec();
+        data[offset..offset + 4].copy_from_slice(&f32::MAX.to_le_bytes());
+        cases.push(data);
+    }
+    for (index, data) in cases.iter().enumerate() {
+        let expected = crate::reference_foldcomp::decode(data, &options);
+        let actual = super::decode(data, &options);
+        assert_eq!(actual.is_err(), expected.is_err(), "case {index}");
     }
 }

@@ -46,12 +46,3 @@ libdeflater = "1.25"
 bstr = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# Migration tests compare with the pinned optimized Foldcomp reference. GCC's
-# unoptimized ARM64 C++ build does not contract the same Float32 expressions.
-# Keep debug/overflow checks; remove this override when the native test adapter
-# is retired. Production dev/release profiles are unchanged.
-[profile.test.package.datafusion-bio-format-foldcomp]
-opt-level = 2
-debug-assertions = true
-overflow-checks = true

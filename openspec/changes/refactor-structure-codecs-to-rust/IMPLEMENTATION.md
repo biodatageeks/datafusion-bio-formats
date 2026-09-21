@@ -419,3 +419,41 @@ revision; the decoder sources have not changed. A pre-cutover `cargo package
 and 56 Foldcomp files, including 29 native files. Both native build scripts
 remain; the translated Rust decoder's Foldcomp MIT notice is included. This
 confirms why runtime wheel success does not yet close the removal/artifact gate.
+
+
+## 2026-09-21: Explicit production cutover and native source removal
+
+The user directed both production readers to switch to Rust and all superseded
+native sources/builds and licenses to be removed now. That instruction supersedes
+the earlier sequencing gate; open performance/fuzz evidence remains open and no
+numerical or performance ceiling is relaxed.
+
+Ordinary and test builds now use the same repository-owned CIF parser and FCZ
+decoder. Both build scripts, direct `cc` dependencies, FFI bridges and the 190
+native-tree files are removed. The obsolete native sanitizer driver is retired;
+Rust property/fuzz checks and separate pinned process comparisons remain. The
+benchmark driver builds its legacy worker only from historical `fe9c879` in an
+ignored development checkout; no old backend is linked into current readers.
+
+The four explicit external-reference tests preserve complete CIF Arrow mapping,
+full database/stress arrays, identities, six-angle/null/connectivity masks and
+malformed-geometry acceptance. `check_provider_reference.py` runs these in
+release mode against the optimized external reference. An initial unoptimized
+Rust test run differed by up to 0.0005303 angstrom on the database; optimized
+release comparisons pass unchanged tolerances. The release-only comparison
+matches the established numerical profiling protocol; debug-build arithmetic
+is not claimed bit-identical to the optimized legacy build.
+
+Current local checks pass the production reader suites, feature-off structure
+and feature-on Foldcomp builds, targeted Clippy with denied warnings, and all
+four release provider-reference tests. The standalone production-source probe
+passes 769 cases / 159,915 coordinate components with zero coordinate/B-factor
+drift on macOS ARM64. The crate package audit finds 26 structure files and 28
+Foldcomp files, with no codec C++ sources or custom build targets. Both include
+Apache-2.0 text; Foldcomp additionally includes the translated code's MIT text,
+upstream notices and a crate-level NOTICE, with `Apache-2.0 AND MIT` metadata.
+
+Consumer integration removes the obsolete structure-specific Gemmi, PEGTL and
+Boost notices, synchronizes Foldcomp MIT attribution, and updates build/docs
+and distribution validation. Final Git pins, rebuilt distributions and installed
+consumer evidence are recorded in the next checkpoint once validated.

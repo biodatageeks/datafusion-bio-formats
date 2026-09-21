@@ -45,12 +45,12 @@ def prepare(args):
                 f"prepare requires an unmodified isolated checkout: {root}"
             )
     before = git(formats, "rev-parse", "HEAD").decode().strip()
-    if args.candidate:
-        patch = HERE / "candidate-routing.patch"
-        subprocess.run(
-            ["git", "-C", str(formats), "apply", "--check", str(patch)], check=True
-        )
-        subprocess.run(["git", "-C", str(formats), "apply", str(patch)], check=True)
+    for kind in ("structure", "foldcomp"):
+        crate = formats / "datafusion" / f"bio-format-{kind}"
+        if (crate / "build.rs").exists() or (crate / "native").exists():
+            raise RuntimeError(
+                f"production codec still has native build inputs: {crate}"
+            )
     path = consumer / "Cargo.toml"
     text = path.read_text()
     pattern = re.compile(
@@ -72,25 +72,60 @@ def prepare(args):
     text = lock.read_text()
     if text.count(source) != 17:
         raise RuntimeError("unexpected frozen formats lock entries")
-    lock.write_text(text.replace(source, ""))
+    text = text.replace(source, "")
+    packages = text.split("[[package]]")
+    for index, package in enumerate(packages):
+        if any(
+            f'\nname = "datafusion-bio-format-{kind}"\n' in package
+            for kind in ("structure", "foldcomp")
+        ):
+            packages[index] = package.replace(' "cc",\n', "")
+    lock.write_text("[[package]]".join(packages))
+    licenses = consumer / "polars_bio/licenses/structure"
+    for name in ("GEMMI-LICENSE.txt", "PEGTL-LICENSE.txt", "BOOST-LICENSE-1.0.txt"):
+        (licenses / name).unlink(missing_ok=True)
+    shutil.copyfile(
+        formats / "datafusion/bio-format-foldcomp/src/fcz/LICENSE-FOLDCOMP",
+        licenses / "FOLDCOMP-LICENSE.txt",
+    )
+    (licenses / "README.md").write_text(license_notice())
     args.output.mkdir(parents=True, exist_ok=True)
     report = {
         "consumer_revision": CONSUMER,
         "formats_revision": before,
-        "backend": "rust-candidate" if args.candidate else "native",
-        "candidate_routing_patch_sha256": sha(
-            (HERE / "candidate-routing.patch").read_bytes()
-        )
-        if args.candidate
-        else None,
+        "backend": "rust",
         "cargo_lock_sha256": sha(lock.read_bytes()),
         "consumer_diff_sha256": sha(git(consumer, "diff", "HEAD", "--")),
         "formats_diff_sha256": sha(git(formats, "diff", "HEAD", "--")),
-        "build_scope": "runtime validation only; native build inputs remain; not a C++-free distribution",
+        "build_scope": "production Rust codecs; no Gemmi/Foldcomp native build inputs",
     }
     (args.output / "source-provenance.json").write_text(
         json.dumps(report, indent=2) + "\n"
     )
+
+
+def license_notice():
+    return """# Structure reader notices
+
+PDB and mmCIF parsing use repository-owned Rust code under Apache-2.0.
+The Rust Foldcomp decoder adapts packing, discretization, residue tables and
+reconstruction from Foldcomp commit `89e37195d3c8ade8d40ead91ad82e6cd2964a967`,
+under the MIT license. The complete MIT text and retained upstream copyright
+notices accompany this file in `FOLDCOMP-LICENSE.txt`.
+
+Copyright (c) 2022 Foldcomp Development Team
+Copyright © 2021 Hyunbin Kim, All rights reserved
+Upstream NeRF contributor: Milot Mirdita
+
+No Gemmi, PEGTL, tcb::span or Foldcomp C++ implementation is bundled with these
+readers. Optional development comparisons obtain the original code separately;
+their historical licenses are retained with that reference checkout.
+
+The exact Rust source is in the [datafusion-bio-formats repository](https://github.com/biodatageeks/datafusion-bio-formats)
+at the immutable revision pinned in this release's Cargo.toml and Cargo.lock.
+The decoder and its notices are in `datafusion/bio-format-foldcomp/src/fcz/`.
+[Original Foldcomp source](https://github.com/steineggerlab/foldcomp/tree/89e37195d3c8ade8d40ead91ad82e6cd2964a967).
+"""
 
 
 def installed_tests(args):
@@ -155,7 +190,6 @@ def main():
     parser.add_argument("command", choices=["prepare", "test"])
     parser.add_argument("--consumer", type=Path, required=True)
     parser.add_argument("--formats", type=Path)
-    parser.add_argument("--candidate", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "prepare":

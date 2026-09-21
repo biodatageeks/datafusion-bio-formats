@@ -215,11 +215,14 @@ not commitments. CIF syntax coverage can expand R1; numerical drift or uncovered
 FCZ variants can expand R3. Re-estimate after R0. R1 and R2/R3 have independent
 implementation paths once the shared contract is frozen.
 
-Merge in reviewable units. The existing production backend remains the default
-until its replacement passes its gate. Keep experimental work on branches or in
-test-only harnesses. Each production switch is reversible by reverting its commit
-or restoring the consumer dependency pin; keep reproducible reference artifacts.
-Do not remove reference tooling before replacement verification is complete.
+Merge in reviewable units. On 2026-09-21 the user explicitly authorized switching
+both production readers to Rust, removing native sources and updating licenses
+while the outstanding performance/fuzz checks continue. This supersedes the
+previous requirement to defer the production switch until every gate completes;
+it does not mark those open checks passed or relax numerical/performance limits.
+Each switch remains reversible by reverting its commit or restoring the recorded
+consumer dependency pin. Retain the external, immutable reference tooling and
+its source/license provenance independently of production dependencies.
 
 ## Packaging, provenance and consumer handoff
 

@@ -1,0 +1,16 @@
+datafusion-bio-format-foldcomp
+
+Repository integration is licensed under Apache-2.0. The Rust decoder in
+src/fcz adapts packing, discretization, residue tables and reconstruction from
+Foldcomp 89e37195d3c8ade8d40ead91ad82e6cd2964a967, under the MIT license.
+
+Copyright (c) 2022 Foldcomp Development Team
+Copyright © 2021 Hyunbin Kim, All rights reserved
+Upstream NeRF contributor: Milot Mirdita
+
+The applicable MIT text and upstream notice are in src/fcz/LICENSE-FOLDCOMP.
+Source: https://github.com/steineggerlab/foldcomp/tree/89e37195d3c8ade8d40ead91ad82e6cd2964a967
+
+No Foldcomp C++ sources, Gemmi, PEGTL, tcb::span or Windows dirent sources are
+included in this crate. Development reference tools obtain the separately
+licensed original sources from an immutable historical checkout.

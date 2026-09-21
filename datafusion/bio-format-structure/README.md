@@ -76,8 +76,8 @@ records raise contextual errors; duplicate atom sites are rejected.
 
 The execution plan partitions whole files, bounded by DataFusion target partitions.
 Each active worker holds one decoded entry and its projected Arrow batch. PDB holds
-the file text while parsing its single entry. CIF holds the native parser document
-for the whole file (the text buffer is released once parsed) and decodes data
+the file text while parsing its single entry. CIF holds the Rust parser document
+with its owned input for the whole file and decodes data
 blocks one at a time as the stream is polled, so a multi-block file never retains
 more than one normalized entry. Defaults are 256 MiB encoded text input, 512 MiB
 decompressed text, and 5 million atoms per entry (per data block). This is bounded
@@ -93,11 +93,13 @@ above the provider. Repeated and
 concurrent collections open fresh cursors. Plan metrics expose sources opened,
 entries decoded, encoded bytes read, and output rows. Counts still decode entries.
 
-`text-formats` (default) builds the pinned Gemmi CIF adapter. Disable default
-features to use just the shared model/geometry/provider API, as Foldcomp does.
-Native build inputs and licenses are packaged under `native/`; a C++17 compiler
-is required, with no installed Gemmi library or runtime Python dependency.
+`text-formats` (default) enables the repository-owned Rust CIF parser and PDB
+reader. Disable default features to use just the shared model/geometry/provider
+API, as Foldcomp does. These readers require no C++ compiler, Gemmi library or
+runtime Python parser. The crate is Apache-2.0 licensed; see `LICENSE-APACHE`.
 
 Offline tests use `../../testing/oracles/structure/` goldens. The pinned generator
 cross-checks Gemmi and Biopython geometry and has a `--check` mode. See the workspace
-structure portability workflow for platform and sanitizer coverage.
+structure portability workflow for platform, Rust fuzz and independent reference
+coverage. The optional legacy reference runs as a separate process from an
+immutable historical checkout; it is never linked into this crate.

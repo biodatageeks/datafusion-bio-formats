@@ -1,22 +1,20 @@
-# Isolated consumer acceptance trial
+# Rust structure codec consumer validation
 
-This harness enables the Rust candidates in a disposable formats checkout and
-builds polars-bio at `ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa`. It does not
-change the main feature branch's production routing or PR #461. The small
-`candidate-routing.patch` preserves the local trial commit `0fcf32d5fe3ad1730aa2826829bbade0ba9eff01`
-relative to `f96d1b0d82b709f161196c3b426f09bdc3d2b0f1`; it routes ordinary mmCIF
-and FCZ calls to the existing Rust modules and keeps native reference calls
-test-only. No parser/decoder algorithm is changed.
+This harness builds polars-bio at `ea24d4a2a59d7c73e2d6c36b3ef0d5168276e0fa`
+against the production Rust readers in a disposable formats checkout. Both
+readers use Rust by default; no routing patch, FFI backend or fallback is added.
 
-Use **clean, disposable** checkouts. `prepare` changes their files, replaces all
-17 formats dependencies together, and removes only those Git source records
-from the frozen consumer lockfile. `maturin --locked` then verifies dependency
-resolution without upgrading it:
+Use **clean, disposable** checkouts. `prepare` rejects codec crates that still
+contain native build inputs, updates all 17 formats dependencies together and
+removes only their old Git source records and the two retired direct `cc`
+dependencies from the consumer lockfile. It synchronizes Foldcomp MIT notices
+and removes the obsolete structure-specific Gemmi/PEGTL/Boost notices. Locked
+builds verify that the rest of the dependency graph stays unchanged.
 
 ```sh
 python -m pip install -r formats/testing/consumer/structure-codecs/requirements.txt
 python formats/testing/consumer/structure-codecs/validate.py prepare \
-  --consumer consumer --formats formats --candidate --output evidence
+  --consumer consumer --formats formats --output evidence
 cd consumer
 python -m maturin build --locked --release --out ../wheels --interpreter python
 cd ..
@@ -25,32 +23,25 @@ python -I formats/testing/consumer/structure-codecs/validate.py test \
   --consumer consumer --output evidence
 ```
 
-Omit `--candidate` to prepare the matching native baseline. Use separate Python
-environments for paired measurements; see the [consumer benchmark](../../benchmarks/structure-codecs/README.md).
-The manual `structure-codecs-consumer.yml` workflow builds and tests on native
-Linux x86_64/ARM64, macOS x86_64/ARM64 and Windows x64 runners. It records source,
-lock, wheel and extension hashes plus test logs/JUnit and every skip reason.
-Tests import the installed extension with isolated Python in a temporary directory
-outside either checkout. Windows omits pyhmmer and therefore skips the MSA module; missing external HMMER and opt-in network tests also remain
-explicit skips. These gaps do not count as passing oracle tests.
-
-Before this new workflow reaches the default branch, dispatch it through the
-existing portability workflow's optional entry point:
+The manual workflow uses native Linux x86_64/ARM64, macOS x86_64/ARM64 and
+Windows x64 runners, with denied Rust warnings. It records source, lock, wheel
+and installed-extension hashes, JUnit/logs and explicit skip reasons. Tests
+import the installed package with isolated Python outside both checkouts.
+Windows omits pyhmmer and skips the MSA module; external HMMER and opt-in network
+checks also remain explicit skips. These are not passing oracle tests.
 
 ```sh
 gh workflow run structures.yml --repo biodatageeks/datafusion-bio-formats \
   --ref feat/rust-structure-codecs -f consumer_validation=true
 ```
 
-This is runtime compatibility evidence, **not** final package acceptance. Native
-sources/build scripts remain in the trial, and two decoder inspection helpers
-still warn in ordinary builds. Final cutover must remove native artifacts, resolve
-those warnings, restore denied-warning distribution checks, test the final pins
-and inspect wheels/sdist. This manual workflow has no publish or merge action.
+This workflow has no publish or merge action. Other polars-bio dependencies can
+still require native toolchains; removal applies to the two structure codecs.
+Use separate installed environments for [paired consumer measurements](../../benchmarks/structure-codecs/README.md).
+Historical native baseline preparation is available at commit
+`fe9c879b87e71b61f39c16d8cccd4f607b3f08eb`.
 
-The [2026-09-21 hosted evidence](results/2026-09-21-hosted.json) records all five
-successful jobs at `d58424b20ee147cddafb62e3deecf26f0bbe78c2`: 231 tests pass
-with four explicit skips on each Linux/macOS target; Windows passes 178 tests
-and skips collection of the MSA module because pyhmmer is unavailable. Source,
-wheel, extension and downloaded artifact hashes are retained. Native build
-inputs still remain, so this closes the candidate runtime matrix only.
+The [earlier hosted evidence](results/2026-09-21-hosted.json) records five
+successful runtime-trial jobs before native build removal: 231 tests with four
+skips per Linux/macOS target, and 178 tests plus a skipped MSA module on Windows.
+Those historical results do not claim to test the final package contents.

@@ -1,5 +1,4 @@
 //! Offline full-array/identity checks captured by the separate pinned oracle.
-use super::decode_native;
 use datafusion_bio_format_structure::StructureOptions;
 use serde_json::Value;
 
@@ -16,11 +15,6 @@ fn string(value: &Value) -> String {
 
 fn float(value: &Value) -> f64 {
     f64::from(f32::from_bits(value.as_u64().unwrap().try_into().unwrap()))
-}
-
-#[test]
-fn native_fcz_matches_pinned_atoms_and_rejections() {
-    check_contract(decode_native);
 }
 
 #[test]

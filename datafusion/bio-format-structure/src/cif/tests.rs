@@ -37,7 +37,8 @@ fn errors_report_block_and_position_and_utf8_is_deferred_per_block() {
 }
 
 #[test]
-fn atom_and_residue_batches_match_retained_mapping_exactly() {
+#[ignore = "requires separately built pinned reference; run check_provider_reference.py"]
+fn external_reference_atom_and_residue_batches_match_retained_mapping_exactly() {
     let real = include_bytes!("../../../../testing/data/structure/1ubq.cif").to_vec();
     let synthetic = b"data_labels\nloop_\n_atom_site.id\n_atom_site.auth_atom_id\n_atom_site.label_atom_id\n_atom_site.auth_comp_id\n_atom_site.label_comp_id\n_atom_site.auth_asym_id\n_atom_site.label_asym_id\n_atom_site.auth_seq_id\n_atom_site.label_seq_id\n_atom_site.label_alt_id\n_atom_site.pdbx_PDB_ins_code\n_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n_atom_site.pdbx_PDB_model_num\n1 authN N MSE MSE Author Label X1 1 . '?' 0 0 0 2\n2 authCA CA MSE MSE Author Label X1 1 . '?' 1 0 0 2\n3 authC C MSE MSE Author Label X1 1 . '?' 1 1 0 2\n_entry.id 'after atoms'\n_struct_asym.id Label\n_struct_asym.entity_id 7\n_entity_poly.entity_id 7\n_entity_poly.type 'polypeptide(L)'\n_chem_comp.id MSE\n_chem_comp.mon_nstd_parent_comp_id MET\ndata_ignored\n_note.value nothing\n".to_vec();
     for data in [&real, &synthetic] {
@@ -46,7 +47,7 @@ fn atom_and_residue_batches_match_retained_mapping_exactly() {
                 level,
                 ..Default::default()
             };
-            let native = mmcif::parse_native_reference(data, &options).unwrap();
+            let native = mmcif::parse_external_reference(data, &options).unwrap();
             let rust = mmcif::parse(data, &options).unwrap();
             assert_eq!(native.len(), rust.len());
             let schema = schema::schema(&options);

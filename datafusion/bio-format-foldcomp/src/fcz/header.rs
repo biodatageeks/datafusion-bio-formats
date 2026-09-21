@@ -73,7 +73,6 @@ pub(super) struct EncodedEntry<'a> {
     header: Header,
     anchors: Vec<Anchor>,
     title: &'a [u8],
-    chain: &'a [u8],
     backbone: Vec<Backbone>,
     sidechain: &'a [u8],
     has_oxt: bool,
@@ -220,7 +219,6 @@ impl<'a> EncodedEntry<'a> {
             header,
             anchors,
             title,
-            chain: &data[13..14],
             backbone,
             sidechain,
             has_oxt,
@@ -241,10 +239,10 @@ impl<'a> EncodedEntry<'a> {
         self.title
     }
     pub fn title(&self) -> Result<&str> {
-        legacy_string(self.title)
+        legacy_string(self.title_bytes())
     }
     pub fn chain(&self) -> Result<&str> {
-        legacy_string(self.chain)
+        legacy_string(std::slice::from_ref(&self.header.chain))
     }
     pub fn backbone(&self) -> &[Backbone] {
         &self.backbone
