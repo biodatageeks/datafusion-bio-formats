@@ -508,11 +508,16 @@ fn write_resolved_format_and_samples(
                 .filter(|&i| !resolved.fields[i].data.is_all_missing(row, num_samples))
                 .collect();
             emit.extend(appended);
+            lead_with_gt(&mut emit, carried, |&i| resolved.fields[i].name == "GT");
             emit
         }
-        None => (0..resolved.fields.len())
-            .filter(|&i| !resolved.fields[i].data.is_all_missing(row, num_samples))
-            .collect(),
+        None => {
+            let mut emit: Vec<usize> = (0..resolved.fields.len())
+                .filter(|&i| !resolved.fields[i].data.is_all_missing(row, num_samples))
+                .collect();
+            lead_with_gt(&mut emit, 0, |&i| resolved.fields[i].name == "GT");
+            emit
+        }
     };
 
     if emit.is_empty() {
@@ -540,6 +545,18 @@ fn write_resolved_format_and_samples(
     }
 
     Ok(())
+}
+
+/// Moves GT to the front of a FORMAT key list, as the specification requires
+/// when it is present, keeping the other keys in order. `carried` is how many
+/// leading keys came from the record's own list: a GT among those is where the
+/// source put it and stays there, so only a GT after them is moved.
+fn lead_with_gt<T>(keys: &mut [T], carried: usize, is_gt: impl Fn(&T) -> bool) {
+    if let Some(pos) = keys.iter().position(is_gt)
+        && pos >= carried
+    {
+        keys[..=pos].rotate_right(1);
+    }
 }
 
 /// Splits a carried FORMAT key list, dropping empty tokens.
@@ -1119,30 +1136,31 @@ fn build_format_and_samples(
     // output have no column to render and are dropped. Keys the batch supplies
     // that the list does not name are additions made downstream of the read;
     // they follow, exactly as an added INFO key does.
-    let (selected, carried_count): (Vec<&str>, usize) = match carried_keys {
-        Some(keys) => {
-            let mut selected: Vec<&str> = split_format_keys(keys)
-                .filter(|key| format_fields.iter().any(|field| field == key))
-                .collect();
-            let carried_count = selected.len();
-            selected.extend(
+    //
+    // Each key keeps a carried flag rather than relying on its position, since
+    // a GT that was added downstream is moved ahead of the carried keys.
+    let mut keyed: Vec<(&str, bool)> = match carried_keys {
+        Some(keys) => split_format_keys(keys)
+            .filter(|key| format_fields.iter().any(|field| field == key))
+            .map(|key| (key, true))
+            .chain(
                 format_fields
                     .iter()
                     .map(String::as_str)
-                    .filter(|field| !split_format_keys(keys).any(|key| key == *field)),
-            );
-            (selected, carried_count)
-        }
+                    .filter(|field| !split_format_keys(keys).any(|key| key == *field))
+                    .map(|field| (field, false)),
+            )
+            .collect(),
         // No carried order: the caller's list is header order, which need not
-        // start with GT. The specification requires GT first when present.
-        None => {
-            let mut selected: Vec<&str> = format_fields.iter().map(String::as_str).collect();
-            if let Some(pos) = selected.iter().position(|key| *key == "GT") {
-                selected[..=pos].rotate_right(1);
-            }
-            (selected, 0)
-        }
+        // start with GT.
+        None => format_fields
+            .iter()
+            .map(|field| (field.as_str(), false))
+            .collect(),
     };
+    let carried_count = keyed.iter().filter(|(_, carried)| *carried).count();
+    lead_with_gt(&mut keyed, carried_count, |(key, _)| *key == "GT");
+    let (selected, carried): (Vec<&str>, Vec<bool>) = keyed.into_iter().unzip();
     if selected.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
@@ -1176,7 +1194,7 @@ fn build_format_and_samples(
     let must_keep: Vec<bool> = selected
         .iter()
         .enumerate()
-        .map(|(i, name)| i < carried_count && supplied(name))
+        .map(|(i, name)| carried[i] && supplied(name))
         .collect();
 
     let field_values = if has_nested_genotypes {
@@ -2627,6 +2645,10 @@ mod tests {
     /// Multisample sources keep FORMAT data in a nested `genotypes` struct and
     /// take a different serializer path, which must honour the layout too.
     fn nested_layout_line(format_keys: Option<&str>) -> String {
+        nested_layout_line_with_fields(format_keys, &["GT", "PS", "DP"])
+    }
+
+    fn nested_layout_line_with_fields(format_keys: Option<&str>, format_fields: &[&str]) -> String {
         let mut gt = ListBuilder::new(StringBuilder::new());
         gt.values().append_value("0/1");
         gt.values().append_value("1/1");
@@ -2697,7 +2719,7 @@ mod tests {
             columns.push(Arc::new(StringArray::from(vec![format_keys])));
         }
         let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
-        let format_fields: Vec<String> = ["GT", "PS", "DP"].iter().map(|s| s.to_string()).collect();
+        let format_fields: Vec<String> = format_fields.iter().map(|s| s.to_string()).collect();
         let samples: Vec<String> = ["S1", "S2"].iter().map(|s| s.to_string()).collect();
         let lines = batch_to_vcf_lines(&batch, &[], &format_fields, &samples, true).unwrap();
         assert_eq!(lines.len(), 1);
@@ -2769,6 +2791,69 @@ mod tests {
         assert_eq!(cols[8], "GT:DP");
         assert_eq!(cols[9], "0/1:25");
         assert_eq!(cols[10], "1/1:30");
+    }
+
+    /// The nested path has its own FORMAT writer, so the GT-first rule has to
+    /// hold there too: every multi-sample source goes through it.
+    #[test]
+    fn nested_genotypes_write_gt_first_without_a_layout() {
+        let line = nested_layout_line_with_fields(None, &["DP", "PS", "GT"]);
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+        assert_eq!(cols[10], "1/1:30");
+    }
+
+    /// A carried list reproduces the source, GT position included.
+    #[test]
+    fn nested_genotypes_keep_a_carried_gt_where_the_source_had_it() {
+        let line = nested_layout_line(Some("DP:GT"));
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "DP:GT");
+        assert_eq!(cols[9], "25:0/1");
+    }
+
+    /// A GT the carried list does not name was added downstream of the read.
+    /// It has no source position to reproduce, so the specification decides:
+    /// GT leads, and the carried keys keep their order behind it.
+    #[test]
+    fn an_appended_gt_leads_the_carried_format_keys() {
+        let line = layout_line(
+            Some("AC;AF"),
+            Some("DP"),
+            None,
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+    }
+
+    #[test]
+    fn nested_genotypes_put_an_appended_gt_first() {
+        let line = nested_layout_line(Some("DP"));
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+        assert_eq!(cols[10], "1/1:30");
+    }
+
+    /// Moving an appended GT to the front shifts the carried keys by one. They
+    /// must still count as carried: PS is missing in the only sample and is
+    /// kept solely because the record's own list names it.
+    #[test]
+    fn carried_keys_stay_carried_behind_an_appended_gt() {
+        let line = layout_line(
+            Some("AC;AF"),
+            Some("DP:PS"),
+            None,
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP:PS");
+        assert_eq!(cols[9], "0/1:25:.");
     }
 
     /// `DP=.` in a source record is a key that is present with a missing value.
