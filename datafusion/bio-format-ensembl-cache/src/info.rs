@@ -11,6 +11,12 @@ use std::path::{Path, PathBuf};
 /// directory names or from the row-level `cache_version` provenance column.
 pub const VEP_CACHE_VERSION_METADATA_KEY: &str = "bio.vep.cache_version";
 
+/// Native cache BAM-edit evidence that enables VEP's transcript-reference mode.
+///
+/// Values are `true` or `false`. A missing key in an older converted cache means
+/// unknown, not false. This records cache metadata, not a user flag override.
+pub const VEP_CACHE_BAM_EDITED_METADATA_KEY: &str = "bio.vep.cache_bam_edited";
+
 #[derive(Debug, Clone)]
 pub(crate) struct SourceDescriptor {
     /// Normalized source name without `source_` prefix, e.g. `dbsnp`, `hgmd_public`.
@@ -51,6 +57,7 @@ pub(crate) struct CacheInfo {
     pub species: String,
     pub assembly: String,
     pub cache_version: String,
+    pub bam_edited: bool,
     pub serializer_type: Option<String>,
     #[allow(dead_code)] // Parsed from info.txt; will be used for tabix index support.
     pub var_type: Option<String>,
@@ -75,15 +82,30 @@ impl CacheInfo {
         let mut species: Option<String> = None;
         let mut assembly: Option<String> = None;
         let mut cache_version: Option<String> = None;
+        let mut bam_edited = false;
         let mut serializer_type: Option<String> = None;
         let mut var_type: Option<String> = None;
         let mut cache_region_size: Option<i64> = None;
         let mut variation_cols: Vec<String> = Vec::new();
         let mut source_by_column: BTreeMap<String, SourceDescriptor> = BTreeMap::new();
 
-        for line in BufReader::new(file).lines() {
+        // split removes only LF, like Perl chomp. Trimming or unquoting the BAM
+        // value would change VEP's truthiness (e.g. "0", spaces and CRLF).
+        for line in BufReader::new(file).split(b'\n') {
             let line = line
                 .map_err(|e| exec_err(format!("Failed reading {}: {}", info_path.display(), e)))?;
+            let line = String::from_utf8(line)
+                .map_err(|e| exec_err(format!("Failed reading {}: {}", info_path.display(), e)))?;
+            let mut native_fields = line.split('\t');
+            if native_fields.next() == Some("bam") {
+                // CacheDir::read_info_file assigns the second token, except
+                // exactly '-'. Missing/empty and exactly '0' are false in Perl.
+                let value = native_fields.next().unwrap_or("");
+                if value != "-" {
+                    bam_edited = !value.is_empty() && value != "0";
+                }
+                continue;
+            }
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -159,6 +181,7 @@ impl CacheInfo {
             species: species.unwrap_or_else(|| "unknown".to_string()),
             assembly: assembly.unwrap_or_else(|| "unknown".to_string()),
             cache_version,
+            bam_edited,
             // Some merged/tabix cache bundles omit serializer metadata entirely.
             // VEP transcript/regulatory caches are storable in that layout.
             serializer_type: serializer_type.or_else(|| Some("storable".to_string())),

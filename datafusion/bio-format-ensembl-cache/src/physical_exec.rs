@@ -1323,6 +1323,7 @@ mod tests {
             species: "homo_sapiens".to_string(),
             assembly: "GRCh38".to_string(),
             cache_version: "110".to_string(),
+            bam_edited: false,
             serializer_type: None,
             var_type: None,
             cache_region_size: None,

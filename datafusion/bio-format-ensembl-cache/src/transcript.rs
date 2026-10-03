@@ -2356,6 +2356,7 @@ mod tests {
             species: "homo_sapiens".to_string(),
             assembly: "GRCh38".to_string(),
             cache_version: "115".to_string(),
+            bam_edited: false,
             serializer_type: Some(serializer_type.to_string()),
             var_type: Some("region".to_string()),
             cache_region_size: Some(1_000_000),

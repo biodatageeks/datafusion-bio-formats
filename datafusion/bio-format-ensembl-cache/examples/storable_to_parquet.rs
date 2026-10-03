@@ -228,8 +228,28 @@ async fn write_translation_split(
 
     let mut results = Vec::new();
 
+    // Split-schema factories have no native CacheInfo. Carry the provider's
+    // verified metadata explicitly instead of losing its BAM reference policy.
+    let native_metadata = ctx
+        .table(table_name)
+        .await?
+        .schema()
+        .as_arrow()
+        .metadata()
+        .clone();
+    let with_native_metadata = |schema: SchemaRef| {
+        Arc::new(datafusion::arrow::datatypes::Schema::new_with_metadata(
+            schema.fields().clone(),
+            native_metadata.clone(),
+        ))
+    };
+
     // --- translation_core: sorted by transcript_id ---
-    let core_schema = translation_core_schema(false, cache_source_type, cache_version);
+    let core_schema = with_native_metadata(translation_core_schema(
+        false,
+        cache_source_type,
+        cache_version,
+    ));
     let core_select = core_schema
         .fields()
         .iter()
@@ -269,7 +289,11 @@ async fn write_translation_split(
     results.push((core_file, core_rows));
 
     // --- translation_sift: sorted by (chrom, start) ---
-    let sift_schema = translation_sift_schema(false, cache_source_type, cache_version);
+    let sift_schema = with_native_metadata(translation_sift_schema(
+        false,
+        cache_source_type,
+        cache_version,
+    ));
     let sift_select = sift_schema
         .fields()
         .iter()
