@@ -230,6 +230,8 @@ async fn write_translation_split(
 
     // Split-schema factories have no native CacheInfo. Carry the provider's
     // verified metadata explicitly instead of losing its BAM reference policy.
+    // Both factories currently carry only native identity/coordinate keys;
+    // the provider is authoritative for all of them, so replace the whole map.
     let native_metadata = ctx
         .table(table_name)
         .await?

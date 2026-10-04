@@ -800,6 +800,8 @@ mod tests {
             ("bam\t\n", false),
             ("bam\t0\n", false),
             ("bam\t-\n", false),
+            (" bam\t/path.bam\n", false),
+            ("bam \t/path.bam\n", false),
             ("bam\t/path/to/alignments.bam\n", true),
             ("bam\tfalse\n", true),
             ("bam\t00\n", true),
