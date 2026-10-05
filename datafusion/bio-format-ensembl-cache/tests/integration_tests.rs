@@ -2775,6 +2775,80 @@ async fn motif_field_values_storable() -> datafusion::common::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn native_bam_policy_survives_projected_and_empty_scans() -> datafusion::common::Result<()> {
+    use datafusion_bio_format_ensembl_cache::VEP_CACHE_BAM_EDITED_METADATA_KEY;
+    use futures::StreamExt;
+    use std::path::Path;
+
+    fn copy_fixture(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_fixture(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    for fixture in ["variation_non_tabix", "transcript_storable"] {
+        for bam in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            copy_fixture(Path::new(&fixture_path(fixture)), root.path());
+            let info = root.path().join("info.txt");
+            let mut metadata = std::fs::read_to_string(&info).unwrap();
+            metadata.push_str(if bam {
+                "\nbam\t/path.bam\n"
+            } else {
+                "\nbam\t0\n"
+            });
+            std::fs::write(info, metadata).unwrap();
+            let options = ensembl_options(root.path().to_string_lossy());
+            let provider: Arc<dyn TableProvider> = if fixture == "variation_non_tabix" {
+                Arc::new(VariationTableProvider::new(options)?)
+            } else {
+                Arc::new(TranscriptTableProvider::new(options)?)
+            };
+            let ctx = SessionContext::new();
+            for projection in [None, Some(vec![0]), Some(vec![])] {
+                for limit in [None, Some(0)] {
+                    let plan = provider
+                        .scan(&ctx.state(), projection.as_ref(), &[], limit)
+                        .await?;
+                    assert_eq!(
+                        plan.schema()
+                            .metadata()
+                            .get(VEP_CACHE_BAM_EDITED_METADATA_KEY),
+                        Some(&bam.to_string())
+                    );
+                    let mut stream =
+                        datafusion::physical_plan::execute_stream(plan, ctx.task_ctx())?;
+                    assert_eq!(
+                        stream
+                            .schema()
+                            .metadata()
+                            .get(VEP_CACHE_BAM_EDITED_METADATA_KEY),
+                        Some(&bam.to_string())
+                    );
+                    while let Some(batch) = stream.next().await {
+                        assert_eq!(
+                            batch?
+                                .schema()
+                                .metadata()
+                                .get(VEP_CACHE_BAM_EDITED_METADATA_KEY),
+                            Some(&bam.to_string())
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn all_entities_have_coordinate_system_metadata() -> datafusion::common::Result<()> {
     let fixtures_and_providers: Vec<(&str, Arc<dyn TableProvider>)> = vec![
         (

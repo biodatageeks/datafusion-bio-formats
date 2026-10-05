@@ -25,10 +25,11 @@ use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     CacheSourceType, EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
-    VEP_CACHE_VERSION_METADATA_KEY, build_export_query, build_translation_dedup_query,
-    translation_core_schema, translation_sift_schema,
+    VEP_CACHE_VERSION_METADATA_KEY, VEP_CHROMOSOMES_METADATA_KEY, build_export_query,
+    build_translation_dedup_query, translation_core_schema, translation_sift_schema,
 };
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Instant;
@@ -185,6 +186,23 @@ fn project_batch(
     )?)
 }
 
+/// Replace the provider's full chromosome list with the selected one, so a
+/// --chrom shard does not advertise chromosomes it has no rows for.
+fn narrow_chromosomes_metadata(
+    metadata: &mut HashMap<String, String>,
+    chrom_filter: Option<&str>,
+) -> datafusion::common::Result<()> {
+    if let Some(chrom) = chrom_filter
+        && metadata.contains_key(VEP_CHROMOSOMES_METADATA_KEY)
+    {
+        metadata.insert(
+            VEP_CHROMOSOMES_METADATA_KEY.to_string(),
+            serde_json::to_string(&[chrom]).map_err(|e| execution_error(e.to_string()))?,
+        );
+    }
+    Ok(())
+}
+
 /// Write translation entity as two split files: translation_core and translation_sift.
 /// Coordinates are 1-based (coordinate_system_zero_based=false) to match VEP conventions.
 async fn write_translation_split(
@@ -228,8 +246,34 @@ async fn write_translation_split(
 
     let mut results = Vec::new();
 
+    // Split-schema factories have no native CacheInfo. Carry the provider's
+    // verified metadata explicitly instead of losing its BAM reference policy.
+    // Both factories currently carry only native identity/coordinate keys;
+    // the provider is authoritative for all of them, so replace the whole map.
+    let mut native_metadata = ctx
+        .table(table_name)
+        .await?
+        .schema()
+        .as_arrow()
+        .metadata()
+        .clone();
+    // A --chrom shard holds only the selected chromosome (the empty case
+    // returned above).
+    narrow_chromosomes_metadata(&mut native_metadata, chrom_filter.as_deref())?;
+    let with_native_metadata = |schema: SchemaRef| {
+        Arc::new(datafusion::arrow::datatypes::Schema::new_with_metadata(
+            schema.fields().clone(),
+            native_metadata.clone(),
+        ))
+    };
+
     // --- translation_core: sorted by transcript_id ---
-    let core_schema = translation_core_schema(false, cache_source_type, cache_version);
+    // The source type and version arguments are overridden by the native map.
+    let core_schema = with_native_metadata(translation_core_schema(
+        false,
+        cache_source_type,
+        cache_version,
+    ));
     let core_select = core_schema
         .fields()
         .iter()
@@ -269,7 +313,12 @@ async fn write_translation_split(
     results.push((core_file, core_rows));
 
     // --- translation_sift: sorted by (chrom, start) ---
-    let sift_schema = translation_sift_schema(false, cache_source_type, cache_version);
+    // The source type and version arguments are overridden by the native map.
+    let sift_schema = with_native_metadata(translation_sift_schema(
+        false,
+        cache_source_type,
+        cache_version,
+    ));
     let sift_select = sift_schema
         .fields()
         .iter()
@@ -582,4 +631,44 @@ async fn main() -> datafusion::common::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata_with_chromosomes() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                VEP_CHROMOSOMES_METADATA_KEY.to_string(),
+                r#"["21","22"]"#.to_string(),
+            ),
+            (
+                VEP_CACHE_VERSION_METADATA_KEY.to_string(),
+                "115".to_string(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn chrom_filter_narrows_chromosomes_metadata() {
+        let mut metadata = metadata_with_chromosomes();
+        narrow_chromosomes_metadata(&mut metadata, Some("22")).unwrap();
+        assert_eq!(metadata[VEP_CHROMOSOMES_METADATA_KEY], r#"["22"]"#);
+        assert_eq!(metadata[VEP_CACHE_VERSION_METADATA_KEY], "115");
+    }
+
+    #[test]
+    fn unfiltered_export_keeps_all_chromosomes() {
+        let mut metadata = metadata_with_chromosomes();
+        narrow_chromosomes_metadata(&mut metadata, None).unwrap();
+        assert_eq!(metadata, metadata_with_chromosomes());
+    }
+
+    #[test]
+    fn missing_chromosomes_key_is_not_invented() {
+        let mut metadata = HashMap::new();
+        narrow_chromosomes_metadata(&mut metadata, Some("22")).unwrap();
+        assert!(metadata.is_empty());
+    }
 }

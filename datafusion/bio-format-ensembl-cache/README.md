@@ -437,6 +437,15 @@ between the expected release, an explicit `cache_version`/`version` in
 including `translation_core` and `translation_sift`, embeds the verified
 release as `bio.vep.cache_version` Arrow schema metadata.
 
+Native provider schemas also carry `bio.vep.cache_bam_edited` (`true` or
+`false`), preserving the native `info.txt` BAM declaration that enables VEP's
+transcript-reference mode. The native reader follows VEP's tab-separated value
+and Perl truthiness: absent, empty and exactly `0` are false; exactly `-` leaves
+the previous declaration unchanged. Older exported schemas with no key have
+unknown policy. The standalone translation split-schema factories also leave
+it unknown because they have no native metadata; exporters must preserve the
+validated provider metadata, as the example converter does.
+
 ### Example: Generate all chr22 Parquet files
 
 ```bash

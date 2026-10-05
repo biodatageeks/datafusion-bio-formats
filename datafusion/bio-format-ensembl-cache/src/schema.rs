@@ -1,5 +1,5 @@
 use crate::errors::{Result, exec_err};
-use crate::info::{CacheInfo, VEP_CACHE_VERSION_METADATA_KEY};
+use crate::info::{CacheInfo, VEP_CACHE_BAM_EDITED_METADATA_KEY, VEP_CACHE_VERSION_METADATA_KEY};
 use crate::source_type::{CacheSourceType, VEP_CACHE_SOURCE_TYPE_METADATA_KEY};
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
@@ -165,6 +165,7 @@ pub(crate) fn variation_schema(
         coordinate_system_zero_based,
         cache_source_type,
         Some(&cache_info.cache_version),
+        Some(cache_info.bam_edited),
     ))
 }
 
@@ -248,6 +249,7 @@ pub(crate) fn transcript_schema(
         coordinate_system_zero_based,
         cache_source_type,
         Some(&cache_info.cache_version),
+        Some(cache_info.bam_edited),
     )
 }
 
@@ -276,6 +278,7 @@ pub(crate) fn regulatory_feature_schema(
         coordinate_system_zero_based,
         cache_source_type,
         Some(&cache_info.cache_version),
+        Some(cache_info.bam_edited),
     )
 }
 
@@ -309,6 +312,7 @@ pub(crate) fn motif_feature_schema(
         coordinate_system_zero_based,
         cache_source_type,
         Some(&cache_info.cache_version),
+        Some(cache_info.bam_edited),
     )
 }
 
@@ -340,6 +344,7 @@ pub(crate) fn exon_schema(
         coordinate_system_zero_based,
         cache_source_type,
         Some(&cache_info.cache_version),
+        Some(cache_info.bam_edited),
     )
 }
 
@@ -381,6 +386,7 @@ pub(crate) fn translation_schema(
         coordinate_system_zero_based,
         cache_source_type,
         Some(&cache_info.cache_version),
+        Some(cache_info.bam_edited),
     )
 }
 
@@ -411,6 +417,7 @@ pub fn translation_core_schema(
         coordinate_system_zero_based,
         cache_source_type,
         Some(cache_version),
+        None,
     )
 }
 
@@ -434,6 +441,7 @@ pub fn translation_sift_schema(
         coordinate_system_zero_based,
         cache_source_type,
         Some(cache_version),
+        None,
     )
 }
 
@@ -459,6 +467,7 @@ fn new_schema(
     coordinate_system_zero_based: bool,
     cache_source_type: CacheSourceType,
     cache_version: Option<&str>,
+    bam_edited: Option<bool>,
 ) -> SchemaRef {
     let mut metadata = HashMap::new();
     metadata.insert(
@@ -473,6 +482,12 @@ fn new_schema(
         metadata.insert(
             VEP_CACHE_VERSION_METADATA_KEY.to_string(),
             cache_version.to_string(),
+        );
+    }
+    if let Some(bam_edited) = bam_edited {
+        metadata.insert(
+            VEP_CACHE_BAM_EDITED_METADATA_KEY.to_string(),
+            bam_edited.to_string(),
         );
     }
     Arc::new(Schema::new_with_metadata(fields, metadata))
@@ -492,6 +507,7 @@ mod tests {
             species: "homo_sapiens".to_string(),
             assembly: "GRCh38".to_string(),
             cache_version: "115".to_string(),
+            bam_edited: false,
             serializer_type: Some("storable".to_string()),
             var_type: Some("region".to_string()),
             cache_region_size: Some(1_000_000),
@@ -772,6 +788,78 @@ mod tests {
                 schema.metadata().get(VEP_CACHE_VERSION_METADATA_KEY),
                 Some(&"115".to_string())
             );
+        }
+    }
+
+    #[test]
+    fn native_bam_reference_policy_reaches_every_entity_schema() {
+        // VEP CacheDir reads the second tab-separated token literally, skips
+        // exactly "-", then uses Perl truthiness to enable use_transcript_ref.
+        for (declaration, expected) in [
+            ("", false),
+            ("bam\t\n", false),
+            ("bam\t0\n", false),
+            ("bam\t-\n", false),
+            (" bam\t/path.bam\n", false),
+            ("bam \t/path.bam\n", false),
+            ("bam\t/path/to/alignments.bam\n", true),
+            ("bam\tfalse\n", true),
+            ("bam\t00\n", true),
+            ("bam\t0.0\n", true),
+            ("bam\t\"0\"\n", true),
+            ("bam\t \n", true),
+            ("bam\t0\r\n", true),
+            ("bam\t/path.bam\nbam\t\n", false),
+            ("bam\t/path.bam\nbam\n", false),
+            ("bam\t/path.bam\nbam\t-\n", true),
+            ("bam\t0\tignored\n", false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(
+                root.path().join("info.txt"),
+                format!(
+                    "cache_version 116\nvariation_cols chr,start,end,variation_name,allele_string\n{declaration}"
+                ),
+            )
+            .unwrap();
+            let info = CacheInfo::from_root(root.path(), None).unwrap();
+            for source in [
+                CacheSourceType::Ensembl,
+                CacheSourceType::Merged,
+                CacheSourceType::RefSeq,
+            ] {
+                let schemas = [
+                    variation_schema(&info, false, source).unwrap(),
+                    transcript_schema(&info, false, source),
+                    exon_schema(&info, false, source),
+                    translation_schema(&info, false, source),
+                    regulatory_feature_schema(&info, false, source),
+                    motif_feature_schema(&info, false, source),
+                ];
+                for schema in schemas {
+                    assert_eq!(
+                        schema.metadata().get("bio.vep.cache_bam_edited"),
+                        Some(&expected.to_string()),
+                        "declaration={declaration:?}, source={source:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn translation_split_schemas_do_not_invent_native_bam_policy() {
+        for source in [
+            CacheSourceType::Ensembl,
+            CacheSourceType::Merged,
+            CacheSourceType::RefSeq,
+        ] {
+            for schema in [
+                translation_core_schema(false, source, "116"),
+                translation_sift_schema(false, source, "116"),
+            ] {
+                assert!(!schema.metadata().contains_key("bio.vep.cache_bam_edited"));
+            }
         }
     }
 
