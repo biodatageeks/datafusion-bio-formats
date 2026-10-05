@@ -100,6 +100,8 @@ impl CacheInfo {
             if native_fields.next() == Some("bam") {
                 // CacheDir::read_info_file assigns the second token, except
                 // exactly '-'. Missing/empty and exactly '0' are false in Perl.
+                // On a CRLF file the value is "-\r", which, as in Perl, is not
+                // a skip but a truthy assignment.
                 let value = native_fields.next().unwrap_or("");
                 if value != "-" {
                     bam_edited = !value.is_empty() && value != "0";

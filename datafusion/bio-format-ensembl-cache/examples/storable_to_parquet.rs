@@ -25,8 +25,8 @@ use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     CacheSourceType, EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
-    VEP_CACHE_VERSION_METADATA_KEY, build_export_query, build_translation_dedup_query,
-    translation_core_schema, translation_sift_schema,
+    VEP_CACHE_VERSION_METADATA_KEY, VEP_CHROMOSOMES_METADATA_KEY, build_export_query,
+    build_translation_dedup_query, translation_core_schema, translation_sift_schema,
 };
 use futures::StreamExt;
 use std::fs::File;
@@ -232,13 +232,23 @@ async fn write_translation_split(
     // verified metadata explicitly instead of losing its BAM reference policy.
     // Both factories currently carry only native identity/coordinate keys;
     // the provider is authoritative for all of them, so replace the whole map.
-    let native_metadata = ctx
+    let mut native_metadata = ctx
         .table(table_name)
         .await?
         .schema()
         .as_arrow()
         .metadata()
         .clone();
+    // The provider lists every source chromosome. A --chrom shard holds only
+    // the selected one (the empty case returned above), so advertise just it.
+    if let Some(chrom) = chrom_filter
+        && native_metadata.contains_key(VEP_CHROMOSOMES_METADATA_KEY)
+    {
+        native_metadata.insert(
+            VEP_CHROMOSOMES_METADATA_KEY.to_string(),
+            serde_json::to_string(&[chrom]).map_err(|e| execution_error(e.to_string()))?,
+        );
+    }
     let with_native_metadata = |schema: SchemaRef| {
         Arc::new(datafusion::arrow::datatypes::Schema::new_with_metadata(
             schema.fields().clone(),
@@ -247,6 +257,7 @@ async fn write_translation_split(
     };
 
     // --- translation_core: sorted by transcript_id ---
+    // The source type and version arguments are overridden by the native map.
     let core_schema = with_native_metadata(translation_core_schema(
         false,
         cache_source_type,
@@ -291,6 +302,7 @@ async fn write_translation_split(
     results.push((core_file, core_rows));
 
     // --- translation_sift: sorted by (chrom, start) ---
+    // The source type and version arguments are overridden by the native map.
     let sift_schema = with_native_metadata(translation_sift_schema(
         false,
         cache_source_type,
