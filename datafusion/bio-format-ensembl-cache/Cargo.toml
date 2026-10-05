@@ -27,3 +27,8 @@ tokio.workspace = true
 futures.workspace = true
 hex = "0.4"
 tempfile = "3"
+
+# Run the example's unit tests under `cargo test` (examples default to test = false).
+[[example]]
+name = "storable_to_parquet"
+test = true
