@@ -1140,12 +1140,30 @@ async fn get_indexed_stream(
                                 ))
                             })?;
 
-                    // BAI exposes per-reference bins directly. Read the concrete BAI
-                    // here because the shared BinningIndex trait does not expose bins.
-                    // CSI does not expose per-reference bins through this path, so scan
-                    // from the first BAM record rather than seek past unmapped records.
+                    // The shared BinningIndex trait does not expose bins, so read the
+                    // concrete BAI or CSI index to seek directly to this reference's tail.
                     let seek_pos = if index_path.ends_with(".csi") {
-                        None
+                        let csi_index = noodles_csi::fs::read(&index_path).map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "Failed to read CSI for unmapped tail: {e}"
+                            ))
+                        })?;
+                        let ref_seq = csi_index
+                            .reference_sequences()
+                            .get(ref_idx)
+                            .ok_or_else(|| {
+                                DataFusionError::Execution(format!(
+                                    "Reference index {ref_idx} not found in CSI index"
+                                ))
+                            })?;
+
+                        ref_seq
+                            .bins()
+                            .values()
+                            .flat_map(|bin| bin.chunks())
+                            .map(|chunk| chunk.end())
+                            .max()
+                            .or_else(|| csi_index.last_first_record_start_position())
                     } else {
                         let bai_index = bam::bai::fs::read(&index_path).map_err(|e| {
                             DataFusionError::Execution(format!(
@@ -1170,8 +1188,8 @@ async fn get_indexed_stream(
                             .or_else(|| bai_index.last_first_record_start_position())
                     };
 
-                    // Open a plain (Send) reader; the index above is only
-                    // needed to compute the seek position, not for the record scan.
+                    // Open a plain reader; the index is only needed to compute the
+                    // seek position, not for the record scan.
                     let (mut unmapped_reader, _unmapped_header) = open_local_bam_sync(&file_path)
                         .map_err(|e| {
                             DataFusionError::Execution(format!("Failed to open BAM file: {e}"))

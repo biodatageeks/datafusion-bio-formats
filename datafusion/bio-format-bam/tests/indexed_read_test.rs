@@ -158,7 +158,7 @@ async fn test_bam_csi_only_full_and_region_scans() -> datafusion::error::Result<
     assert_eq!(estimates[0].unmapped_count, 1);
     assert_eq!(estimates[0].leaf_bin_span, 16_384);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
     let provider = BamTableProvider::new(
         bam_path.to_string_lossy().into_owned(),
         None,

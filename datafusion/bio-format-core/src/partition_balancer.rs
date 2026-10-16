@@ -70,9 +70,23 @@ pub fn balance_partitions(
 
     // Single partition fast path
     if target == 1 {
-        let total: u64 = estimates.iter().map(|e| e.estimated_bytes).sum();
+        let mut total: u64 = estimates.iter().map(|e| e.estimated_bytes).sum();
+        let mut regions = Vec::with_capacity(estimates.len() * 2);
+        for estimate in estimates {
+            let chrom = estimate.region.chrom.clone();
+            regions.push(estimate.region);
+            if estimate.unmapped_count > 0 {
+                regions.push(GenomicRegion {
+                    chrom,
+                    start: None,
+                    end: None,
+                    unmapped_tail: true,
+                });
+                total += 1;
+            }
+        }
         return vec![PartitionAssignment {
-            regions: estimates.into_iter().map(|e| e.region).collect(),
+            regions,
             total_estimated_bytes: total,
         }];
     }
@@ -659,6 +673,19 @@ mod tests {
             1,
             "Should emit unmapped_tail for unsplit regions when unmapped_count > 0"
         );
+    }
+
+    #[test]
+    fn test_unmapped_tail_emitted_for_single_partition() {
+        let estimates = vec![estimate_with_unmapped("chr1", 20, Some(100), 1)];
+        let result = balance_partitions(estimates, 1);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].regions.len(), 2);
+        assert!(!result[0].regions[0].unmapped_tail);
+        assert!(result[0].regions[1].unmapped_tail);
+        assert_eq!(result[0].regions[1].chrom, "chr1");
+        assert_eq!(result[0].total_estimated_bytes, 21);
     }
 
     #[test]
