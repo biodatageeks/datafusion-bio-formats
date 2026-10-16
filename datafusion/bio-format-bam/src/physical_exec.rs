@@ -1147,9 +1147,6 @@ async fn get_indexed_stream(
                     // The shared BinningIndex trait does not expose bins, so read the
                     // concrete index once and cache each reference's direct tail seek.
                     if bam_tail_seek_positions.is_none() {
-                        // For coordinate-sorted BAMs, no-position records follow positioned
-                        // records. The global last-first hint is only a fallback when a
-                        // reference has no chunk-derived seek point.
                         let positions = if index_path.ends_with(".csi") {
                             let index = noodles_csi::fs::read(&index_path).map_err(|e| {
                                 DataFusionError::Execution(format!(
@@ -1166,7 +1163,6 @@ async fn get_indexed_stream(
                                         .flat_map(|bin| bin.chunks())
                                         .map(|chunk| chunk.end())
                                         .max()
-                                        .or_else(|| index.last_first_record_start_position())
                                 })
                                 .collect()
                         } else {
@@ -1185,7 +1181,6 @@ async fn get_indexed_stream(
                                         .flat_map(|bin| bin.chunks())
                                         .map(|chunk| chunk.end())
                                         .max()
-                                        .or_else(|| index.last_first_record_start_position())
                                 })
                                 .collect()
                         };
