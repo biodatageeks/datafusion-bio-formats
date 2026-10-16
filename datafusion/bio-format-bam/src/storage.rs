@@ -9,7 +9,7 @@ use noodles_bam::Record;
 use noodles_bam::io::Reader;
 use noodles_bgzf::r#async::io::Reader as AsyncBgzfReader;
 use noodles_bgzf::io::Reader as BgzfReader;
-use noodles_csi::binning_index::BinningIndex as _;
+use noodles_csi::BinningIndex;
 use noodles_csi::binning_index::ReferenceSequence as BinningRefSeq;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
@@ -272,8 +272,21 @@ impl SamReader {
 /// worker via `async_stream::try_stream!` instead of a dedicated reader thread.
 pub struct IndexedBamReader {
     reader: bam::io::Reader<noodles_bgzf::io::Reader<File>>,
-    index: bam::bai::Index,
+    index: Box<dyn BinningIndex + Send + Sync>,
     header: sam::Header,
+}
+
+/// Read a BAM index using its sidecar extension.
+///
+/// BAM indexes can be BAI or CSI. The latter is required for references longer
+/// than 2^29 bases, so treating every discovered index as BAI makes those BAMs
+/// unreadable even for full scans.
+pub fn read_bam_index(index_path: &str) -> Result<Box<dyn BinningIndex + Send + Sync>, Error> {
+    if index_path.ends_with(".csi") {
+        Ok(Box::new(noodles_csi::fs::read(index_path)?))
+    } else {
+        Ok(Box::new(bam::bai::fs::read(index_path)?))
+    }
 }
 
 impl IndexedBamReader {
@@ -281,9 +294,9 @@ impl IndexedBamReader {
     ///
     /// # Arguments
     /// * `file_path` - Path to the BAM file
-    /// * `index_path` - Path to the BAI index file
+    /// * `index_path` - Path to the BAI or CSI index file
     pub fn new(file_path: &str, index_path: &str) -> Result<Self, Error> {
-        let index = bam::bai::fs::read(index_path)?;
+        let index = read_bam_index(index_path)?;
         let inner = BgzfReader::new(File::open(file_path)?);
         let mut reader = bam::io::Reader::from(inner);
         let header = reader.read_header()?;
@@ -439,11 +452,11 @@ pub fn estimate_sizes_from_bai(
 ///
 /// This count represents records with `reference_sequence_id = None` and no alignment
 /// position. These records are not returned by per-reference range queries.
-pub fn unplaced_unmapped_count_from_bai(index_path: &str) -> u64 {
-    match bam::bai::fs::read(index_path) {
+pub fn unplaced_unmapped_count_from_index(index_path: &str) -> u64 {
+    match read_bam_index(index_path) {
         Ok(index) => index.unplaced_unmapped_record_count().unwrap_or(0),
         Err(e) => {
-            log::debug!("Failed to read BAI index for unplaced/unmapped count: {e}");
+            log::debug!("Failed to read BAM index for unplaced/unmapped count: {e}");
             0
         }
     }

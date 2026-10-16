@@ -1047,7 +1047,7 @@ impl TableProvider for BamTableProvider {
                 // not covered by per-reference region queries.
                 if is_full_scan {
                     let unplaced_unmapped =
-                        crate::storage::unplaced_unmapped_count_from_bai(index_path);
+                        crate::storage::unplaced_unmapped_count_from_index(index_path);
                     if append_unplaced_unmapped_partition(&mut assignments, unplaced_unmapped) {
                         debug!(
                             "BAM indexed full scan: added dedicated no-coor partition ({unplaced_unmapped} records)"
