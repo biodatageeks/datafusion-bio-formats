@@ -1170,6 +1170,21 @@ async fn test_gtf_csi_only_index_supports_full_and_region_scans() {
     std::fs::copy(format!("{fixture_dir}/multi_chrom.gtf.gz"), &gtf_path).unwrap();
     std::fs::copy(format!("{fixture_dir}/multi_chrom.gtf.gz.csi"), &csi_path).unwrap();
 
+    let estimates = datafusion_bio_format_gtf::storage::estimate_sizes_from_index(
+        csi_path.to_str().unwrap(),
+        &[datafusion_bio_format_core::genomic_filter::GenomicRegion {
+            chrom: "chr1".to_string(),
+            start: None,
+            end: None,
+            unmapped_tail: false,
+        }],
+        &["chr1".to_string()],
+        &[],
+    );
+    assert!(estimates[0].contig_length.is_some());
+    assert!(!estimates[0].nonempty_bin_positions.is_empty());
+    assert_eq!(estimates[0].leaf_bin_span, 16_384);
+
     let table =
         GtfTableProvider::new(gtf_path.to_string_lossy().into_owned(), None, None, true).unwrap();
     let ctx = SessionContext::new();

@@ -281,7 +281,7 @@ impl TableProvider for GtfTableProvider {
 
             if !regions.is_empty() {
                 let target_partitions = state.config().target_partitions();
-                let estimates = crate::storage::estimate_sizes_from_tbi(
+                let estimates = crate::storage::estimate_sizes_from_index(
                     index_path,
                     &regions,
                     &self.contig_names,
