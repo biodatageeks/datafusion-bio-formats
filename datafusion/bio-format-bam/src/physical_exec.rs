@@ -1212,6 +1212,9 @@ async fn get_indexed_stream(
                             DataFusionError::Execution(format!("BGZF seek failed: {e}"))
                         })?;
                     }
+                    // If no chunk exists (possible for CSI references), keep the reader
+                    // after the consumed BAM header and scan from the first alignment.
+                    // This is correct but may rescan the file for each such tail.
 
                     let mut unmapped_buf = bam::Record::default();
                     let mut unmapped_count: usize = 0;
