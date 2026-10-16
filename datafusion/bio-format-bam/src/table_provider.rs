@@ -1034,7 +1034,7 @@ impl TableProvider for BamTableProvider {
             if !regions.is_empty() {
                 // Use balanced partitioning with index size estimates
                 let target_partitions = state.config().target_partitions();
-                let estimates = crate::storage::estimate_sizes_from_bai(
+                let estimates = crate::storage::estimate_sizes_from_index(
                     index_path,
                     &regions,
                     &self.reference_names,

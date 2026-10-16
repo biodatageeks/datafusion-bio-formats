@@ -134,7 +134,7 @@ async fn test_bam_full_scan_total_count() -> datafusion::error::Result<()> {
     Ok(())
 }
 
-/// A CSI sidecar must be read as CSI rather than passed to the BAI parser.
+/// A CSI-only sidecar exercises both auto-discovery and CSI parsing without a BAI fallback.
 #[tokio::test]
 async fn test_bam_csi_only_full_and_region_scans() -> datafusion::error::Result<()> {
     let temp_dir = TempDir::new().expect("create temporary directory");
@@ -142,6 +142,21 @@ async fn test_bam_csi_only_full_and_region_scans() -> datafusion::error::Result<
     let csi_path = temp_dir.path().join("csi_only.bam.csi");
     std::fs::copy("tests/multi_chrom.bam", &bam_path).expect("copy BAM fixture");
     std::fs::copy("tests/multi_chrom.bam.csi", &csi_path).expect("copy CSI fixture");
+
+    let estimates = datafusion_bio_format_bam::storage::estimate_sizes_from_index(
+        csi_path.to_str().unwrap(),
+        &[datafusion_bio_format_core::genomic_filter::GenomicRegion {
+            chrom: "chr1".to_string(),
+            start: None,
+            end: None,
+            unmapped_tail: false,
+        }],
+        &["chr1".to_string()],
+        &[],
+    );
+    assert!(estimates[0].estimated_bytes > 1);
+    assert_eq!(estimates[0].unmapped_count, 1);
+    assert_eq!(estimates[0].leaf_bin_span, 16_384);
 
     let ctx = SessionContext::new();
     let provider = BamTableProvider::new(

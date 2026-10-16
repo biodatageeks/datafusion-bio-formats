@@ -1024,10 +1024,9 @@ async fn get_indexed_stream(
                 };
             }
 
-            // Lazily read the BAM index at most once per partition — only if an
-            // unmapped-tail region is actually encountered — and reuse it across
-            // all such regions (avoids re-reading the full index per region while
-            // not penalizing the common no-unmapped-tail case).
+            // Cache the generic BAM index only for the global no-coor metadata hint.
+            // Per-reference BAI tails need the concrete BAI bins, which the shared
+            // BinningIndex trait does not expose.
             let mut bam_index: Option<Box<dyn noodles_csi::BinningIndex + Send + Sync>> = None;
 
             for region in &regions {
@@ -1130,13 +1129,6 @@ async fn get_indexed_stream(
 
                     // Per-reference unmapped tail (reference_sequence_id set,
                     // alignment_start absent).
-                    if bam_index.is_none() {
-                        bam_index = Some(crate::storage::read_bam_index(&index_path).map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "Failed to read BAM index for unmapped tail: {e}"
-                            ))
-                        })?);
-                    }
                     let ref_idx =
                         names
                             .iter()
@@ -1148,10 +1140,10 @@ async fn get_indexed_stream(
                                 ))
                             })?;
 
-                    // BAI exposes per-reference bins directly. CSI does not
-                    // expose those through this path, so scan from the start
-                    // rather than risk seeking past this reference's unmapped
-                    // records.
+                    // BAI exposes per-reference bins directly. Read the concrete BAI
+                    // here because the shared BinningIndex trait does not expose bins.
+                    // CSI does not expose per-reference bins through this path, so scan
+                    // from the first BAM record rather than seek past unmapped records.
                     let seek_pos = if index_path.ends_with(".csi") {
                         None
                     } else {
@@ -1176,8 +1168,7 @@ async fn get_indexed_stream(
                             .map(|chunk| chunk.end())
                             .max()
                             .or_else(|| bai_index.last_first_record_start_position())
-                    }
-                    .unwrap_or_default();
+                    };
 
                     // Open a plain (Send) reader; the index above is only
                     // needed to compute the seek position, not for the record scan.
@@ -1185,9 +1176,11 @@ async fn get_indexed_stream(
                         .map_err(|e| {
                             DataFusionError::Execution(format!("Failed to open BAM file: {e}"))
                         })?;
-                    unmapped_reader.get_mut().seek(seek_pos).map_err(|e| {
-                        DataFusionError::Execution(format!("BGZF seek failed: {e}"))
-                    })?;
+                    if let Some(seek_pos) = seek_pos {
+                        unmapped_reader.get_mut().seek(seek_pos).map_err(|e| {
+                            DataFusionError::Execution(format!("BGZF seek failed: {e}"))
+                        })?;
+                    }
 
                     let mut unmapped_buf = bam::Record::default();
                     let mut unmapped_count: usize = 0;
