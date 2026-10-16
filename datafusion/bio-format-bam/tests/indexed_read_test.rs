@@ -156,6 +156,7 @@ async fn test_bam_csi_only_full_and_region_scans() -> datafusion::error::Result<
     );
     assert!(estimates[0].estimated_bytes > 1);
     assert_eq!(estimates[0].unmapped_count, 1);
+    // This CSI fixture uses min_shift=14, matching BAI's 16 KiB leaf-bin span.
     assert_eq!(estimates[0].leaf_bin_span, 16_384);
 
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));

@@ -172,6 +172,15 @@ pub fn balance_partitions(
                 .unwrap();
             partitions[min_idx].regions.push(est.region.clone());
             zero_est_counts[min_idx] += 1;
+            if est.unmapped_count > 0 {
+                partitions[min_idx].regions.push(GenomicRegion {
+                    chrom: est.region.chrom.clone(),
+                    start: None,
+                    end: None,
+                    unmapped_tail: true,
+                });
+                partitions[min_idx].total_estimated_bytes += 1;
+            }
             continue;
         }
 
@@ -709,6 +718,23 @@ mod tests {
         assert!(!result[0].regions[0].unmapped_tail);
         assert!(result[0].regions[1].unmapped_tail);
         assert_eq!(result[0].total_estimated_bytes, 1);
+    }
+
+    #[test]
+    fn test_unmapped_tail_emitted_for_zero_byte_estimate_in_mixed_input() {
+        let estimates = vec![
+            estimate_with_unmapped("chr1", 100, Some(100), 0),
+            estimate_with_unmapped("chr2", 0, Some(100), 1),
+        ];
+        let result = balance_partitions(estimates, 4);
+
+        let tails: Vec<&GenomicRegion> = result
+            .iter()
+            .flat_map(|partition| partition.regions.iter())
+            .filter(|region| region.unmapped_tail)
+            .collect();
+        assert_eq!(tails.len(), 1);
+        assert_eq!(tails[0].chrom, "chr2");
     }
 
     #[test]
