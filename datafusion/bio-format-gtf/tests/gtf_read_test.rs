@@ -3,6 +3,7 @@ use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_gtf::table_provider::GtfTableProvider;
 use std::sync::Arc;
+use tempfile::TempDir;
 
 fn test_gtf_path() -> String {
     format!("{}/tests/test.gtf", env!("CARGO_MANIFEST_DIR"))
@@ -1158,4 +1159,37 @@ async fn test_gtf_indexed_attributes_sentinel() {
         saw_attributes,
         "Expected at least one row with a non-empty nested attributes list"
     );
+}
+
+#[tokio::test]
+async fn test_gtf_csi_only_index_supports_full_and_region_scans() {
+    let temp_dir = TempDir::new().unwrap();
+    let fixture_dir = format!("{}/tests", env!("CARGO_MANIFEST_DIR"));
+    let gtf_path = temp_dir.path().join("multi_chrom.gtf.gz");
+    let csi_path = temp_dir.path().join("multi_chrom.gtf.gz.csi");
+    std::fs::copy(format!("{fixture_dir}/multi_chrom.gtf.gz"), &gtf_path).unwrap();
+    std::fs::copy(format!("{fixture_dir}/multi_chrom.gtf.gz.csi"), &csi_path).unwrap();
+
+    let table =
+        GtfTableProvider::new(gtf_path.to_string_lossy().into_owned(), None, None, true).unwrap();
+    let ctx = SessionContext::new();
+    ctx.register_table("gtf", Arc::new(table)).unwrap();
+
+    let full_scan = ctx
+        .sql("SELECT chrom FROM gtf")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(total_rows(&full_scan), 10);
+
+    let region_scan = ctx
+        .sql("SELECT chrom FROM gtf WHERE chrom = 'chr1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(total_rows(&region_scan), 5);
 }

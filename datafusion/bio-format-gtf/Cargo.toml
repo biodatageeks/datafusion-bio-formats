@@ -27,6 +27,9 @@ bytes.workspace = true
 async-compression.workspace = true
 log.workspace = true
 
+[dev-dependencies]
+tempfile = "3.10"
+
 [[example]]
 name = "test_gtf_reader"
 path = "./examples/test_gtf_reader.rs"

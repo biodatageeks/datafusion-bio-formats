@@ -319,7 +319,10 @@ pub(crate) fn parse_gtf_line(line: &str) -> Result<GtfRecord, Error> {
 /// BGZF-compressed, tabix-indexed GTF files. This is used when an index file (.tbi/.csi)
 /// is available and genomic region filters are present.
 pub struct IndexedGtfReader {
-    reader: noodles_csi::io::IndexedReader<noodles_bgzf::io::Reader<File>, noodles_tabix::Index>,
+    reader: noodles_csi::io::IndexedReader<
+        noodles_bgzf::io::Reader<File>,
+        Box<dyn noodles_csi::BinningIndex + Send + Sync>,
+    >,
     contig_names: Vec<String>,
 }
 
@@ -330,7 +333,12 @@ impl IndexedGtfReader {
     /// * `file_path` - Path to the BGZF-compressed GTF file (.gtf.gz)
     /// * `index_path` - Path to the TBI or CSI index file
     pub fn new(file_path: &str, index_path: &str) -> Result<Self, Error> {
-        let index = noodles_tabix::fs::read(index_path)?;
+        let index: Box<dyn noodles_csi::BinningIndex + Send + Sync> =
+            if index_path.ends_with(".csi") {
+                Box::new(noodles_csi::fs::read(index_path)?)
+            } else {
+                Box::new(noodles_tabix::fs::read(index_path)?)
+            };
 
         let contig_names = index
             .header()
@@ -342,10 +350,8 @@ impl IndexedGtfReader {
             })
             .unwrap_or_default();
 
-        let reader = noodles_tabix::io::indexed_reader::Builder::default()
-            .set_index(index)
-            .build_from_path(Path::new(file_path))
-            .map_err(Error::other)?;
+        let file = File::open(Path::new(file_path))?;
+        let reader = noodles_csi::io::IndexedReader::new(file, index);
 
         Ok(Self {
             reader,
