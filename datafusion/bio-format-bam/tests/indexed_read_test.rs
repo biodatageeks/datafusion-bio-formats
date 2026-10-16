@@ -159,25 +159,29 @@ async fn test_bam_csi_only_full_and_region_scans() -> datafusion::error::Result<
     // This CSI fixture uses min_shift=14, matching BAI's 16 KiB leaf-bin span.
     assert_eq!(estimates[0].leaf_bin_span, 16_384);
 
-    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
-    let provider = BamTableProvider::new(
-        bam_path.to_string_lossy().into_owned(),
-        None,
-        true,
-        None,
-        false,
-        true,
-        100,
-        None,
-    )
-    .await?;
-    ctx.register_table("bam", Arc::new(provider))?;
+    for target_partitions in [1, 4] {
+        let ctx = SessionContext::new_with_config(
+            SessionConfig::new().with_target_partitions(target_partitions),
+        );
+        let provider = BamTableProvider::new(
+            bam_path.to_string_lossy().into_owned(),
+            None,
+            true,
+            None,
+            false,
+            true,
+            100,
+            None,
+        )
+        .await?;
+        ctx.register_table("bam", Arc::new(provider))?;
 
-    assert_eq!(count_rows(&ctx, "SELECT chrom FROM bam").await, 421);
-    assert_eq!(
-        count_rows(&ctx, "SELECT chrom FROM bam WHERE chrom = 'chr1'").await,
-        160
-    );
+        assert_eq!(count_rows(&ctx, "SELECT chrom FROM bam").await, 421);
+        assert_eq!(
+            count_rows(&ctx, "SELECT chrom FROM bam WHERE chrom = 'chr1'").await,
+            160
+        );
+    }
 
     Ok(())
 }
