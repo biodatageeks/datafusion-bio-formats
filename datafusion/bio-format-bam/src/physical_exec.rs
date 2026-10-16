@@ -1028,6 +1028,10 @@ async fn get_indexed_stream(
             // Per-reference BAI tails need the concrete BAI bins, which the shared
             // BinningIndex trait does not expose.
             let mut bam_index: Option<Box<dyn noodles_csi::BinningIndex + Send + Sync>> = None;
+            // Cache concrete per-reference tail seek points so multiple synthetic tails
+            // do not reread and reparse the full BAI/CSI sidecar.
+            let mut bam_tail_seek_positions:
+                Option<Vec<Option<noodles_bgzf::VirtualPosition>>> = None;
 
             for region in &regions {
                 // Handle unmapped tail regions via direct BGZF seek —
@@ -1141,52 +1145,58 @@ async fn get_indexed_stream(
                             })?;
 
                     // The shared BinningIndex trait does not expose bins, so read the
-                    // concrete BAI or CSI index to seek directly to this reference's tail.
-                    let seek_pos = if index_path.ends_with(".csi") {
-                        let csi_index = noodles_csi::fs::read(&index_path).map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "Failed to read CSI for unmapped tail: {e}"
-                            ))
-                        })?;
-                        let ref_seq = csi_index
-                            .reference_sequences()
-                            .get(ref_idx)
-                            .ok_or_else(|| {
+                    // concrete index once and cache each reference's direct tail seek.
+                    if bam_tail_seek_positions.is_none() {
+                        let positions = if index_path.ends_with(".csi") {
+                            let index = noodles_csi::fs::read(&index_path).map_err(|e| {
                                 DataFusionError::Execution(format!(
-                                    "Reference index {ref_idx} not found in CSI index"
+                                    "Failed to read CSI for unmapped tails: {e}"
                                 ))
                             })?;
-
-                        ref_seq
-                            .bins()
-                            .values()
-                            .flat_map(|bin| bin.chunks())
-                            .map(|chunk| chunk.end())
-                            .max()
-                            .or_else(|| csi_index.last_first_record_start_position())
-                    } else {
-                        let bai_index = bam::bai::fs::read(&index_path).map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "Failed to read BAI for unmapped tail: {e}"
-                            ))
-                        })?;
-                        let ref_seq = bai_index
-                            .reference_sequences()
-                            .get(ref_idx)
-                            .ok_or_else(|| {
+                            index
+                                .reference_sequences()
+                                .iter()
+                                .map(|ref_seq| {
+                                    ref_seq
+                                        .bins()
+                                        .values()
+                                        .flat_map(|bin| bin.chunks())
+                                        .map(|chunk| chunk.end())
+                                        .max()
+                                        .or_else(|| index.last_first_record_start_position())
+                                })
+                                .collect()
+                        } else {
+                            let index = bam::bai::fs::read(&index_path).map_err(|e| {
                                 DataFusionError::Execution(format!(
-                                    "Reference index {ref_idx} not found in BAI index"
+                                    "Failed to read BAI for unmapped tails: {e}"
                                 ))
                             })?;
-
-                        ref_seq
-                            .bins()
-                            .values()
-                            .flat_map(|bin| bin.chunks())
-                            .map(|chunk| chunk.end())
-                            .max()
-                            .or_else(|| bai_index.last_first_record_start_position())
-                    };
+                            index
+                                .reference_sequences()
+                                .iter()
+                                .map(|ref_seq| {
+                                    ref_seq
+                                        .bins()
+                                        .values()
+                                        .flat_map(|bin| bin.chunks())
+                                        .map(|chunk| chunk.end())
+                                        .max()
+                                        .or_else(|| index.last_first_record_start_position())
+                                })
+                                .collect()
+                        };
+                        bam_tail_seek_positions = Some(positions);
+                    }
+                    let seek_pos = bam_tail_seek_positions
+                        .as_ref()
+                        .and_then(|positions| positions.get(ref_idx))
+                        .copied()
+                        .ok_or_else(|| {
+                            DataFusionError::Execution(format!(
+                                "Reference index {ref_idx} not found in BAM index"
+                            ))
+                        })?;
 
                     // Open a plain reader; the index is only needed to compute the
                     // seek position, not for the record scan.
