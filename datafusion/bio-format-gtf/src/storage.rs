@@ -319,7 +319,10 @@ pub(crate) fn parse_gtf_line(line: &str) -> Result<GtfRecord, Error> {
 /// BGZF-compressed, tabix-indexed GTF files. This is used when an index file (.tbi/.csi)
 /// is available and genomic region filters are present.
 pub struct IndexedGtfReader {
-    reader: noodles_csi::io::IndexedReader<noodles_bgzf::io::Reader<File>, noodles_tabix::Index>,
+    reader: noodles_csi::io::IndexedReader<
+        noodles_bgzf::io::Reader<File>,
+        Box<dyn noodles_csi::BinningIndex + Send + Sync>,
+    >,
     contig_names: Vec<String>,
 }
 
@@ -330,7 +333,12 @@ impl IndexedGtfReader {
     /// * `file_path` - Path to the BGZF-compressed GTF file (.gtf.gz)
     /// * `index_path` - Path to the TBI or CSI index file
     pub fn new(file_path: &str, index_path: &str) -> Result<Self, Error> {
-        let index = noodles_tabix::fs::read(index_path)?;
+        let index: Box<dyn noodles_csi::BinningIndex + Send + Sync> =
+            if index_path.ends_with(".csi") {
+                Box::new(noodles_csi::fs::read(index_path)?)
+            } else {
+                Box::new(noodles_tabix::fs::read(index_path)?)
+            };
 
         let contig_names = index
             .header()
@@ -342,10 +350,8 @@ impl IndexedGtfReader {
             })
             .unwrap_or_default();
 
-        let reader = noodles_tabix::io::indexed_reader::Builder::default()
-            .set_index(index)
-            .build_from_path(Path::new(file_path))
-            .map_err(Error::other)?;
+        let file = File::open(Path::new(file_path))?;
+        let reader = noodles_csi::io::IndexedReader::new(file, index);
 
         Ok(Self {
             reader,
@@ -370,35 +376,73 @@ impl IndexedGtfReader {
     }
 }
 
-/// Estimate compressed byte sizes per region from a TBI (tabix) index.
+/// Estimate compressed byte sizes per region from a TBI or CSI index.
 ///
-/// Reads the tabix index and estimates the compressed byte range for each genomic region
-/// by examining the chunks in each reference's bins using VirtualPosition offsets.
-pub fn estimate_sizes_from_tbi(
+/// Estimates the compressed byte range for each genomic region by examining index chunks.
+pub fn estimate_sizes_from_index(
     index_path: &str,
     regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
     contig_names: &[String],
     contig_lengths: &[u64],
 ) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    if index_path.ends_with(".csi") {
+        match noodles_csi::fs::read(index_path) {
+            Ok(index) => {
+                estimate_sizes_from_binning_index(&index, regions, contig_names, contig_lengths)
+            }
+            Err(e) => {
+                log::debug!("Failed to read CSI index for size estimation: {e}");
+                empty_size_estimates(regions)
+            }
+        }
+    } else {
+        match noodles_tabix::fs::read(index_path) {
+            Ok(index) => {
+                estimate_sizes_from_binning_index(&index, regions, contig_names, contig_lengths)
+            }
+            Err(e) => {
+                log::debug!("Failed to read TBI index for size estimation: {e}");
+                empty_size_estimates(regions)
+            }
+        }
+    }
+}
+
+fn empty_size_estimates(
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
     use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
 
-    let index = match noodles_tabix::fs::read(index_path) {
-        Ok(idx) => idx,
-        Err(e) => {
-            log::debug!("Failed to read TBI index for size estimation: {e}");
-            return regions
-                .iter()
-                .map(|r| RegionSizeEstimate {
-                    region: r.clone(),
-                    estimated_bytes: 1,
-                    contig_length: None,
-                    unmapped_count: 0,
-                    nonempty_bin_positions: Vec::new(),
-                    leaf_bin_span: 0,
-                })
-                .collect();
-        }
-    };
+    regions
+        .iter()
+        .map(|r| RegionSizeEstimate {
+            region: r.clone(),
+            estimated_bytes: 1,
+            contig_length: None,
+            unmapped_count: 0,
+            nonempty_bin_positions: Vec::new(),
+            leaf_bin_span: 0,
+        })
+        .collect()
+}
+
+fn estimate_sizes_from_binning_index<I>(
+    index: &noodles_csi::binning_index::index::Index<I>,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    contig_names: &[String],
+    contig_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate>
+where
+    I: noodles_csi::binning_index::index::reference_sequence::index::Index,
+{
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+    use noodles_csi::binning_index::BinningIndex;
+
+    let min_shift = index.min_shift();
+    let depth = index.depth();
+    let leaf_bin_first = ((1usize << (depth * 3)) - 1) / 7;
+    let leaf_bin_last = leaf_bin_first + (1usize << (depth * 3)) - 1;
+    let leaf_bin_span = 1u64 << min_shift;
 
     let contig_name_to_idx: std::collections::HashMap<&str, usize> = contig_names
         .iter()
@@ -428,12 +472,6 @@ pub fn estimate_sizes_from_tbi(
                 })
                 .unwrap_or(1);
 
-            // Collect non-empty leaf bin positions for data-aware splitting.
-            // TBI uses the same binning scheme as BAI (min_shift=14, depth=5).
-            const TBI_LEAF_FIRST: usize = 4681;
-            const TBI_LEAF_LAST: usize = 37448;
-            const TBI_LEAF_SPAN: u64 = 16384;
-
             let mut nonempty_bin_positions: Vec<u64> = ref_idx
                 .and_then(|idx| index.reference_sequences().get(idx))
                 .map(|ref_seq| {
@@ -441,8 +479,8 @@ pub fn estimate_sizes_from_tbi(
                         .bins()
                         .keys()
                         .copied()
-                        .filter(|&bin_id| (TBI_LEAF_FIRST..=TBI_LEAF_LAST).contains(&bin_id))
-                        .map(|bin_id| ((bin_id - TBI_LEAF_FIRST) as u64) * TBI_LEAF_SPAN + 1)
+                        .filter(|&bin_id| (leaf_bin_first..=leaf_bin_last).contains(&bin_id))
+                        .map(|bin_id| ((bin_id - leaf_bin_first) as u64) * leaf_bin_span + 1)
                         .collect()
                 })
                 .unwrap_or_default();
@@ -454,17 +492,9 @@ pub fn estimate_sizes_from_tbi(
                 .or_else(|| {
                     nonempty_bin_positions
                         .last()
-                        .map(|&max_pos| max_pos + TBI_LEAF_SPAN - 1)
+                        .map(|&max_pos| max_pos + leaf_bin_span - 1)
                 })
                 .or_else(|| {
-                    const LEVEL_OFFSETS: [(usize, u64); 6] = [
-                        (0, 1 << 29),
-                        (1, 1 << 26),
-                        (9, 1 << 23),
-                        (73, 1 << 20),
-                        (585, 1 << 17),
-                        (4681, 1 << 14),
-                    ];
                     ref_idx
                         .and_then(|idx| index.reference_sequences().get(idx))
                         .and_then(|ref_seq| {
@@ -472,22 +502,7 @@ pub fn estimate_sizes_from_tbi(
                                 .bins()
                                 .keys()
                                 .copied()
-                                .filter_map(|bin_id| {
-                                    LEVEL_OFFSETS.iter().rev().find_map(|&(offset, span)| {
-                                        if bin_id >= offset
-                                            && bin_id
-                                                < LEVEL_OFFSETS
-                                                    .iter()
-                                                    .find(|&&(o, _)| o > offset)
-                                                    .map_or(37449, |&(o, _)| o)
-                                        {
-                                            let idx_in_level = (bin_id - offset) as u64;
-                                            Some((idx_in_level + 1) * span)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                })
+                                .filter_map(|bin_id| bin_end_position(bin_id, min_shift, depth))
                                 .max()
                         })
                 });
@@ -498,8 +513,22 @@ pub fn estimate_sizes_from_tbi(
                 contig_length,
                 unmapped_count: 0,
                 nonempty_bin_positions,
-                leaf_bin_span: TBI_LEAF_SPAN,
+                leaf_bin_span,
             }
         })
         .collect()
+}
+
+fn bin_end_position(bin_id: usize, min_shift: u8, depth: u8) -> Option<u64> {
+    (0..=depth).find_map(|level| {
+        let level_bin_count = 1usize << (level * 3);
+        let level_first_bin = (level_bin_count - 1) / 7;
+        let level_end_bin = level_first_bin + level_bin_count;
+
+        (level_first_bin..level_end_bin).contains(&bin_id).then(|| {
+            let bins_from_start = (bin_id - level_first_bin + 1) as u64;
+            let bin_span = 1u64 << (min_shift + (depth - level) * 3);
+            bins_from_start * bin_span
+        })
+    })
 }

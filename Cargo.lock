@@ -1582,6 +1582,7 @@ dependencies = [
  "noodles-csi",
  "noodles-tabix",
  "opendal",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
