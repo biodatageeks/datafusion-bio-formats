@@ -70,9 +70,23 @@ pub fn balance_partitions(
 
     // Single partition fast path
     if target == 1 {
-        let total: u64 = estimates.iter().map(|e| e.estimated_bytes).sum();
+        let mut total: u64 = estimates.iter().map(|e| e.estimated_bytes).sum();
+        let mut regions = Vec::with_capacity(estimates.len() * 2);
+        for estimate in estimates {
+            let chrom = estimate.region.chrom.clone();
+            regions.push(estimate.region);
+            if estimate.unmapped_count > 0 {
+                regions.push(GenomicRegion {
+                    chrom,
+                    start: None,
+                    end: None,
+                    unmapped_tail: true,
+                });
+                total += 1;
+            }
+        }
         return vec![PartitionAssignment {
-            regions: estimates.into_iter().map(|e| e.region).collect(),
+            regions,
             total_estimated_bytes: total,
         }];
     }
@@ -89,7 +103,18 @@ pub fn balance_partitions(
             })
             .collect();
         for (i, est) in estimates.into_iter().enumerate() {
-            bins[i % num_bins].regions.push(est.region);
+            let bin = &mut bins[i % num_bins];
+            let chrom = est.region.chrom.clone();
+            bin.regions.push(est.region);
+            if est.unmapped_count > 0 {
+                bin.regions.push(GenomicRegion {
+                    chrom,
+                    start: None,
+                    end: None,
+                    unmapped_tail: true,
+                });
+                bin.total_estimated_bytes += 1;
+            }
         }
         return bins;
     }
@@ -147,6 +172,15 @@ pub fn balance_partitions(
                 .unwrap();
             partitions[min_idx].regions.push(est.region.clone());
             zero_est_counts[min_idx] += 1;
+            if est.unmapped_count > 0 {
+                partitions[min_idx].regions.push(GenomicRegion {
+                    chrom: est.region.chrom.clone(),
+                    start: None,
+                    end: None,
+                    unmapped_tail: true,
+                });
+                partitions[min_idx].total_estimated_bytes += 1;
+            }
             continue;
         }
 
@@ -659,6 +693,48 @@ mod tests {
             1,
             "Should emit unmapped_tail for unsplit regions when unmapped_count > 0"
         );
+    }
+
+    #[test]
+    fn test_unmapped_tail_emitted_for_single_partition() {
+        let estimates = vec![estimate_with_unmapped("chr1", 20, Some(100), 1)];
+        let result = balance_partitions(estimates, 1);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].regions.len(), 2);
+        assert!(!result[0].regions[0].unmapped_tail);
+        assert!(result[0].regions[1].unmapped_tail);
+        assert_eq!(result[0].regions[1].chrom, "chr1");
+        assert_eq!(result[0].total_estimated_bytes, 21);
+    }
+
+    #[test]
+    fn test_unmapped_tail_emitted_for_zero_byte_estimate() {
+        let estimates = vec![estimate_with_unmapped("chr1", 0, Some(100), 1)];
+        let result = balance_partitions(estimates, 4);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].regions.len(), 2);
+        assert!(!result[0].regions[0].unmapped_tail);
+        assert!(result[0].regions[1].unmapped_tail);
+        assert_eq!(result[0].total_estimated_bytes, 1);
+    }
+
+    #[test]
+    fn test_unmapped_tail_emitted_for_zero_byte_estimate_in_mixed_input() {
+        let estimates = vec![
+            estimate_with_unmapped("chr1", 100, Some(100), 0),
+            estimate_with_unmapped("chr2", 0, Some(100), 1),
+        ];
+        let result = balance_partitions(estimates, 4);
+
+        let tails: Vec<&GenomicRegion> = result
+            .iter()
+            .flat_map(|partition| partition.regions.iter())
+            .filter(|region| region.unmapped_tail)
+            .collect();
+        assert_eq!(tails.len(), 1);
+        assert_eq!(tails[0].chrom, "chr2");
     }
 
     #[test]

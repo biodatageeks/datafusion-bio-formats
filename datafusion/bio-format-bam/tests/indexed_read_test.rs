@@ -13,6 +13,7 @@ use datafusion::prelude::*;
 use datafusion_bio_format_bam::table_provider::BamTableProvider;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tempfile::TempDir;
 
 use datafusion::prelude::SessionConfig;
 
@@ -129,6 +130,58 @@ async fn test_bam_full_scan_total_count() -> datafusion::error::Result<()> {
         chr1 + chr2 + chrx,
         "Full scan total ({total}) should equal sum of per-chrom counts (chr1={chr1}, chr2={chr2}, chrX={chrx})"
     );
+
+    Ok(())
+}
+
+/// A CSI-only sidecar exercises both auto-discovery and CSI parsing without a BAI fallback.
+#[tokio::test]
+async fn test_bam_csi_only_full_and_region_scans() -> datafusion::error::Result<()> {
+    let temp_dir = TempDir::new().expect("create temporary directory");
+    let bam_path = temp_dir.path().join("csi_only.bam");
+    let csi_path = temp_dir.path().join("csi_only.bam.csi");
+    std::fs::copy("tests/multi_chrom.bam", &bam_path).expect("copy BAM fixture");
+    std::fs::copy("tests/multi_chrom.bam.csi", &csi_path).expect("copy CSI fixture");
+
+    let estimates = datafusion_bio_format_bam::storage::estimate_sizes_from_index(
+        csi_path.to_str().unwrap(),
+        &[datafusion_bio_format_core::genomic_filter::GenomicRegion {
+            chrom: "chr1".to_string(),
+            start: None,
+            end: None,
+            unmapped_tail: false,
+        }],
+        &["chr1".to_string()],
+        &[],
+    );
+    assert!(estimates[0].estimated_bytes > 1);
+    assert_eq!(estimates[0].unmapped_count, 1);
+    // This CSI fixture uses min_shift=14, matching BAI's 16 KiB leaf-bin span.
+    assert_eq!(estimates[0].leaf_bin_span, 16_384);
+
+    for target_partitions in [1, 4] {
+        let ctx = SessionContext::new_with_config(
+            SessionConfig::new().with_target_partitions(target_partitions),
+        );
+        let provider = BamTableProvider::new(
+            bam_path.to_string_lossy().into_owned(),
+            None,
+            true,
+            None,
+            false,
+            true,
+            100,
+            None,
+        )
+        .await?;
+        ctx.register_table("bam", Arc::new(provider))?;
+
+        assert_eq!(count_rows(&ctx, "SELECT chrom FROM bam").await, 421);
+        assert_eq!(
+            count_rows(&ctx, "SELECT chrom FROM bam WHERE chrom = 'chr1'").await,
+            160
+        );
+    }
 
     Ok(())
 }

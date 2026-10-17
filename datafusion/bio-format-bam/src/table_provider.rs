@@ -1034,7 +1034,7 @@ impl TableProvider for BamTableProvider {
             if !regions.is_empty() {
                 // Use balanced partitioning with index size estimates
                 let target_partitions = state.config().target_partitions();
-                let estimates = crate::storage::estimate_sizes_from_bai(
+                let estimates = crate::storage::estimate_sizes_from_index(
                     index_path,
                     &regions,
                     &self.reference_names,
@@ -1047,7 +1047,7 @@ impl TableProvider for BamTableProvider {
                 // not covered by per-reference region queries.
                 if is_full_scan {
                     let unplaced_unmapped =
-                        crate::storage::unplaced_unmapped_count_from_bai(index_path);
+                        crate::storage::unplaced_unmapped_count_from_index(index_path);
                     if append_unplaced_unmapped_partition(&mut assignments, unplaced_unmapped) {
                         debug!(
                             "BAM indexed full scan: added dedicated no-coor partition ({unplaced_unmapped} records)"
