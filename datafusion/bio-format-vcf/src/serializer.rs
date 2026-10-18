@@ -19,32 +19,51 @@ use datafusion_bio_format_core::{
 
 const DOSAGE_MODE: &str = "dosage";
 
-/// Characters VCF 4.3 §1.2 reserves inside an INFO value: `;` ends the field,
-/// `=` separates a key from its value, `,` separates list elements and `%`
-/// starts an escape.
-const INFO_RESERVED: &[u8] = b";=%,";
+/// Builds the byte table of what [`push_percent_encoded`] escapes: the given
+/// reserved ASCII characters plus every ASCII control.
+const fn escape_table(reserved: &[u8]) -> [bool; 256] {
+    let mut table = [false; 256];
+    let mut b = 0;
+    while b < 0x20 {
+        table[b] = true;
+        b += 1;
+    }
+    table[0x7f] = true;
+    let mut i = 0;
+    while i < reserved.len() {
+        table[reserved[i] as usize] = true;
+        i += 1;
+    }
+    table
+}
+
+/// What an INFO value escapes (VCF 4.3 §1.2): `;` ends the field, `=`
+/// separates a key from its value, `,` separates list elements and `%` starts
+/// an escape.
+static INFO_RESERVED: [bool; 256] = escape_table(b";=%,");
 
 /// The FORMAT counterpart, where `:` separates a sample's sub-fields.
-const FORMAT_RESERVED: &[u8] = b":%,";
+static FORMAT_RESERVED: [bool; 256] = escape_table(b":%,");
 
-/// Appends `value` to `buf`, percent-encoding the `reserved` ASCII characters
-/// and every ASCII control with upper-case hex (VCF 4.3 §1.2).
+/// Appends `value` to `buf`, percent-encoding every byte `escapes` marks (the
+/// reserved ASCII characters and the ASCII controls) with upper-case hex.
 ///
 /// The reader decodes these escapes, so a value written back raw would end the
 /// INFO field early or add a list element (biodatageeks/vepyr#207). Anything
 /// non-ASCII is written as is: encoding it too, as `utf8_percent_encode` does,
-/// would rewrite every UTF-8 value that was never escaped in the input.
-fn push_percent_encoded(buf: &mut String, value: &str, reserved: &[u8]) {
+/// would rewrite every UTF-8 value that was never escaped in the input. The
+/// table lookup keeps the scan to one load per byte: it runs on every string
+/// value the writer emits.
+fn push_percent_encoded(buf: &mut String, value: &str, escapes: &[bool; 256]) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let needs_escape = |b: u8| b < 0x20 || b == 0x7f || reserved.contains(&b);
     // Fast path: no byte needs an escape. Bytes, not chars, are safe here: every
-    // byte of a multi-byte UTF-8 character is >= 0x80 and so never matches.
-    if !value.bytes().any(needs_escape) {
+    // byte of a multi-byte UTF-8 character is >= 0x80 and is never marked.
+    if !value.bytes().any(|b| escapes[usize::from(b)]) {
         buf.push_str(value);
         return;
     }
     for c in value.chars() {
-        if c.is_ascii() && needs_escape(c as u8) {
+        if c.is_ascii() && escapes[c as usize] {
             let b = c as u8;
             buf.push('%');
             buf.push(HEX[usize::from(b >> 4)] as char);
@@ -55,9 +74,9 @@ fn push_percent_encoded(buf: &mut String, value: &str, reserved: &[u8]) {
     }
 }
 
-fn percent_encoded(value: &str, reserved: &[u8]) -> String {
+fn percent_encoded(value: &str, escapes: &[bool; 256]) -> String {
     let mut encoded = String::with_capacity(value.len());
-    push_percent_encoded(&mut encoded, value, reserved);
+    push_percent_encoded(&mut encoded, value, escapes);
     encoded
 }
 
@@ -406,7 +425,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    push_percent_encoded(buf, s, FORMAT_RESERVED);
+                    push_percent_encoded(buf, s, &FORMAT_RESERVED);
                 }
             }
         }
@@ -418,7 +437,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    push_percent_encoded(buf, s, FORMAT_RESERVED);
+                    push_percent_encoded(buf, s, &FORMAT_RESERVED);
                 }
             }
         }
@@ -430,7 +449,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    push_percent_encoded(buf, s, FORMAT_RESERVED);
+                    push_percent_encoded(buf, s, &FORMAT_RESERVED);
                 }
             }
         }
@@ -1084,7 +1103,7 @@ fn extract_info_value_string(
         if verbatim {
             s.to_string()
         } else {
-            percent_encoded(s, INFO_RESERVED)
+            percent_encoded(s, &INFO_RESERVED)
         }
     };
 
@@ -1118,7 +1137,7 @@ fn extract_info_value_string(
     // Handle both List and LargeList
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values, INFO_RESERVED)?;
+        let value_strings = extract_list_values(&values, &INFO_RESERVED)?;
         if value_strings.is_empty() {
             return Ok(None);
         }
@@ -1126,7 +1145,7 @@ fn extract_info_value_string(
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values, INFO_RESERVED)?;
+        let value_strings = extract_list_values(&values, &INFO_RESERVED)?;
         if value_strings.is_empty() {
             return Ok(None);
         }
@@ -1139,9 +1158,9 @@ fn extract_info_value_string(
 /// Extracts values from a list array as strings
 /// Supports both standard Arrow types and Polars "Large" variants
 ///
-/// String elements are percent-encoded with `reserved` (INFO or FORMAT) before
+/// String elements are percent-encoded with `escapes` (INFO or FORMAT) before
 /// the caller joins them with `,`.
-fn extract_list_values(array: &dyn Array, reserved: &[u8]) -> Result<Vec<String>> {
+fn extract_list_values(array: &dyn Array, escapes: &[bool; 256]) -> Result<Vec<String>> {
     let mut values = Vec::new();
     let len = array.len();
 
@@ -1174,7 +1193,7 @@ fn extract_list_values(array: &dyn Array, reserved: &[u8]) -> Result<Vec<String>
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(percent_encoded(str_arr.value(i), reserved));
+                values.push(percent_encoded(str_arr.value(i), escapes));
             }
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<LargeStringArray>() {
@@ -1183,7 +1202,7 @@ fn extract_list_values(array: &dyn Array, reserved: &[u8]) -> Result<Vec<String>
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(percent_encoded(str_arr.value(i), reserved));
+                values.push(percent_encoded(str_arr.value(i), escapes));
             }
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<StringViewArray>() {
@@ -1192,7 +1211,7 @@ fn extract_list_values(array: &dyn Array, reserved: &[u8]) -> Result<Vec<String>
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(percent_encoded(str_arr.value(i), reserved));
+                values.push(percent_encoded(str_arr.value(i), escapes));
             }
         }
     }
@@ -1458,27 +1477,27 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(percent_encoded(s, FORMAT_RESERVED));
+        return Ok(percent_encoded(s, &FORMAT_RESERVED));
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
         let s = arr.value(row);
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(percent_encoded(s, FORMAT_RESERVED));
+        return Ok(percent_encoded(s, &FORMAT_RESERVED));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
         let s = arr.value(row);
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(percent_encoded(s, FORMAT_RESERVED));
+        return Ok(percent_encoded(s, &FORMAT_RESERVED));
     }
 
     // Handle both List and LargeList
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values, FORMAT_RESERVED)?;
+        let value_strings = extract_list_values(&values, &FORMAT_RESERVED)?;
         if value_strings.is_empty() {
             return Ok(".".to_string());
         }
@@ -1486,7 +1505,7 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values, FORMAT_RESERVED)?;
+        let value_strings = extract_list_values(&values, &FORMAT_RESERVED)?;
         if value_strings.is_empty() {
             return Ok(".".to_string());
         }
