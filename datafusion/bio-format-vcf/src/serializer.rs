@@ -12,12 +12,68 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::{
     GENOTYPE_OUTPUT_MODE_KEY,
     metadata::{
-        VCF_FIELD_FORMAT_ID_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_RECORD_LAYOUT_FORMAT_KEYS,
-        VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+        VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY,
+        VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
     },
 };
 
 const DOSAGE_MODE: &str = "dosage";
+
+/// Characters VCF 4.3 §1.2 reserves inside an INFO value: `;` ends the field,
+/// `=` separates a key from its value, `,` separates list elements and `%`
+/// starts an escape.
+const INFO_RESERVED: &[u8] = b";=%,";
+
+/// The FORMAT counterpart, where `:` separates a sample's sub-fields.
+const FORMAT_RESERVED: &[u8] = b":%,";
+
+/// Appends `value` to `buf`, percent-encoding the `reserved` ASCII characters
+/// and every ASCII control with upper-case hex (VCF 4.3 §1.2).
+///
+/// The reader decodes these escapes, so a value written back raw would end the
+/// INFO field early or add a list element (biodatageeks/vepyr#207). Anything
+/// non-ASCII is written as is: encoding it too, as `utf8_percent_encode` does,
+/// would rewrite every UTF-8 value that was never escaped in the input.
+fn push_percent_encoded(buf: &mut String, value: &str, reserved: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let needs_escape = |b: u8| b < 0x20 || b == 0x7f || reserved.contains(&b);
+    if !value.bytes().any(needs_escape) {
+        buf.push_str(value);
+        return;
+    }
+    for c in value.chars() {
+        if c.is_ascii() && needs_escape(c as u8) {
+            let b = c as u8;
+            buf.push('%');
+            buf.push(HEX[usize::from(b >> 4)] as char);
+            buf.push(HEX[usize::from(b & 0x0f)] as char);
+        } else {
+            buf.push(c);
+        }
+    }
+}
+
+fn percent_encoded(value: &str, reserved: &[u8]) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    push_percent_encoded(&mut encoded, value, reserved);
+    encoded
+}
+
+/// Whether an INFO column already holds joined VCF text to be written verbatim.
+///
+/// A scalar string column declared with a Number other than 1 is one: the
+/// engine's CSQ, escaped by the VEP rules, with `,` between its blocks. The
+/// reader never produces that shape, since it reads such a field as a list, so
+/// no input value can bypass the encoding this way.
+fn is_joined_info_text(field: &Field) -> bool {
+    matches!(
+        field.data_type(),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    ) && field
+        .metadata()
+        .get(VCF_FIELD_NUMBER_KEY)
+        .is_some_and(|number| number != "1")
+}
 
 fn field_is_gt(field: &Field) -> bool {
     field.name() == "GT"
@@ -347,7 +403,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    buf.push_str(s);
+                    push_percent_encoded(buf, s, FORMAT_RESERVED);
                 }
             }
         }
@@ -359,7 +415,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    buf.push_str(s);
+                    push_percent_encoded(buf, s, FORMAT_RESERVED);
                 }
             }
         }
@@ -371,7 +427,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    buf.push_str(s);
+                    push_percent_encoded(buf, s, FORMAT_RESERVED);
                 }
             }
         }
@@ -882,14 +938,20 @@ fn get_optional_f64_column_by_name<'a>(
 }
 
 /// Builds a map from INFO field name to column index
+/// Maps each INFO field to its column index and whether the column already
+/// holds joined text to write verbatim (see [`is_joined_info_text`]).
 fn build_info_column_map(
     batch: &RecordBatch,
     info_fields: &[String],
-) -> std::collections::HashMap<String, usize> {
+) -> std::collections::HashMap<String, (usize, bool)> {
+    let schema = batch.schema();
     let mut map = std::collections::HashMap::new();
     for field_name in info_fields {
-        if let Ok(idx) = batch.schema().index_of(field_name) {
-            map.insert(field_name.clone(), idx);
+        if let Ok(idx) = schema.index_of(field_name) {
+            map.insert(
+                field_name.clone(),
+                (idx, is_joined_info_text(schema.field(idx))),
+            );
         }
     }
     map
@@ -961,14 +1023,14 @@ fn build_info_string(
     row: usize,
     field_order: &[&str],
     carried_count: usize,
-    info_columns: &std::collections::HashMap<String, usize>,
+    info_columns: &std::collections::HashMap<String, (usize, bool)>,
 ) -> Result<String> {
     let mut info_parts = Vec::new();
 
     for (position, field_name) in field_order.iter().enumerate() {
         let field_name = *field_name;
-        let col_idx = match info_columns.get(field_name) {
-            Some(&idx) => idx,
+        let (col_idx, verbatim) = match info_columns.get(field_name) {
+            Some(&entry) => entry,
             None => continue, // Column not in batch, skip
         };
 
@@ -985,7 +1047,7 @@ fn build_info_string(
             continue;
         }
 
-        if let Some(value_str) = extract_info_value_string(column.as_ref(), row)? {
+        if let Some(value_str) = extract_info_value_string(column.as_ref(), row, verbatim)? {
             if value_str == "true" {
                 // Flag type - just include the name
                 info_parts.push(field_name.to_string());
@@ -1004,10 +1066,24 @@ fn build_info_string(
 
 /// Extracts an INFO value as a string from an Arrow array at a specific row
 /// Supports both standard Arrow types and Polars "Large" variants (LargeUtf8, LargeList)
-fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<String>> {
+///
+/// String values are percent-encoded unless `verbatim` says the column already
+/// holds joined VCF text.
+fn extract_info_value_string(
+    array: &dyn Array,
+    row: usize,
+    verbatim: bool,
+) -> Result<Option<String>> {
     if array.is_null(row) {
         return Ok(None);
     }
+    let string_value = |s: &str| {
+        if verbatim {
+            s.to_string()
+        } else {
+            percent_encoded(s, INFO_RESERVED)
+        }
+    };
 
     if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
         return Ok(Some(arr.value(row).to_string()));
@@ -1027,19 +1103,19 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
 
     // Handle Utf8 (StringArray), LargeUtf8 (LargeStringArray), and Utf8View (StringViewArray)
     if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(Some(arr.value(row).to_string()));
+        return Ok(Some(string_value(arr.value(row))));
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(Some(arr.value(row).to_string()));
+        return Ok(Some(string_value(arr.value(row))));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
-        return Ok(Some(arr.value(row).to_string()));
+        return Ok(Some(string_value(arr.value(row))));
     }
 
     // Handle both List and LargeList
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values)?;
+        let value_strings = extract_list_values(&values, INFO_RESERVED)?;
         if value_strings.is_empty() {
             return Ok(None);
         }
@@ -1047,7 +1123,7 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values)?;
+        let value_strings = extract_list_values(&values, INFO_RESERVED)?;
         if value_strings.is_empty() {
             return Ok(None);
         }
@@ -1059,7 +1135,10 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
 
 /// Extracts values from a list array as strings
 /// Supports both standard Arrow types and Polars "Large" variants
-fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
+///
+/// String elements are percent-encoded with `reserved` (INFO or FORMAT) before
+/// the caller joins them with `,`.
+fn extract_list_values(array: &dyn Array, reserved: &[u8]) -> Result<Vec<String>> {
     let mut values = Vec::new();
     let len = array.len();
 
@@ -1092,7 +1171,7 @@ fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(str_arr.value(i).to_string());
+                values.push(percent_encoded(str_arr.value(i), reserved));
             }
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<LargeStringArray>() {
@@ -1101,7 +1180,7 @@ fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(str_arr.value(i).to_string());
+                values.push(percent_encoded(str_arr.value(i), reserved));
             }
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<StringViewArray>() {
@@ -1110,7 +1189,7 @@ fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(str_arr.value(i).to_string());
+                values.push(percent_encoded(str_arr.value(i), reserved));
             }
         }
     }
@@ -1376,27 +1455,27 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(s.to_string());
+        return Ok(percent_encoded(s, FORMAT_RESERVED));
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
         let s = arr.value(row);
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(s.to_string());
+        return Ok(percent_encoded(s, FORMAT_RESERVED));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
         let s = arr.value(row);
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(s.to_string());
+        return Ok(percent_encoded(s, FORMAT_RESERVED));
     }
 
     // Handle both List and LargeList
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values)?;
+        let value_strings = extract_list_values(&values, FORMAT_RESERVED)?;
         if value_strings.is_empty() {
             return Ok(".".to_string());
         }
@@ -1404,7 +1483,7 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values)?;
+        let value_strings = extract_list_values(&values, FORMAT_RESERVED)?;
         if value_strings.is_empty() {
             return Ok(".".to_string());
         }
@@ -1422,7 +1501,8 @@ mod tests {
     };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion_bio_format_core::metadata::{
-        VCF_FIELD_FIELD_TYPE_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN,
+        VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_NUMBER_KEY, VCF_FORMAT_KEYS_COLUMN,
+        VCF_INFO_KEYS_COLUMN,
     };
 
     /// A layout column as the reader builds it: named for humans, marked for
@@ -1520,6 +1600,95 @@ mod tests {
                 Err(error) => error.to_string(),
             };
         assert!(error.contains("does not support genotype dosage input"));
+    }
+
+    /// One record with the core columns and one extra INFO column.
+    fn line_with_info_column(field: Field, column: ArrayRef) -> String {
+        let mut fields = create_test_schema().fields().to_vec();
+        let name = field.name().clone();
+        fields.push(Arc::new(field));
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![Some("rs1")])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(30.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                column,
+            ],
+        )
+        .unwrap();
+        let lines = batch_to_vcf_lines(&batch, &[name], &[], &[], true).unwrap();
+        lines[0].line.split('\t').nth(7).unwrap().to_string()
+    }
+
+    fn with_number(field: Field, number: &str) -> Field {
+        field.with_metadata(std::collections::HashMap::from([(
+            VCF_FIELD_NUMBER_KEY.to_string(),
+            number.to_string(),
+        )]))
+    }
+
+    #[test]
+    fn a_scalar_info_string_is_percent_encoded() {
+        let info = line_with_info_column(
+            with_number(Field::new("X", DataType::Utf8, true), "1"),
+            Arc::new(StringArray::from(vec![Some("k=v;w,x%y\tz")])),
+        );
+        assert_eq!(info, "X=k%3Dv%3Bw%2Cx%25y%09z");
+    }
+
+    #[test]
+    fn a_scalar_info_string_without_metadata_is_percent_encoded() {
+        let info = line_with_info_column(
+            Field::new("X", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("a;b")])),
+        );
+        assert_eq!(info, "X=a%3Bb");
+    }
+
+    #[test]
+    fn each_list_element_is_encoded_before_the_join() {
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        builder.values().append_value("a,b");
+        builder.values().append_value("c;d");
+        builder.append(true);
+        let info = line_with_info_column(
+            Field::new(
+                "L",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Arc::new(builder.finish()),
+        );
+        assert_eq!(info, "L=a%2Cb,c%3Bd");
+    }
+
+    #[test]
+    fn unreserved_characters_stay_literal() {
+        let info = line_with_info_column(
+            Field::new("D", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("MedGen:C1|a\u{2013}b é")])),
+        );
+        assert_eq!(info, "D=MedGen:C1|a\u{2013}b é");
+    }
+
+    /// A scalar string column declared with a Number other than 1 already holds
+    /// joined VCF text — the engine's CSQ, escaped by the VEP rules, with `,`
+    /// between its blocks. The reader never produces that shape (it reads such a
+    /// field as a list), so writing it verbatim cannot skip an input value.
+    #[test]
+    fn an_already_joined_scalar_column_is_written_verbatim() {
+        let csq = "T|synonymous_variant|p.Ala125%3D|a=b,T|intron_variant||";
+        let info = line_with_info_column(
+            with_number(Field::new("CSQ", DataType::Utf8, true), "."),
+            Arc::new(StringArray::from(vec![Some(csq)])),
+        );
+        assert_eq!(info, format!("CSQ={csq}"));
     }
 
     #[test]
