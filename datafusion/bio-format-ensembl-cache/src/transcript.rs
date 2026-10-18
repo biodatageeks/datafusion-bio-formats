@@ -1170,28 +1170,27 @@ fn storable_promoted_vef_sequence(
         .or_else(|| storable_sequence_value(object.get(key)))
 }
 
-/// A scalar VEP keeps on `_variation_effect_feature_cache`, falling back to
-/// the transcript's top level like the sequence fields above.
-fn json_promoted_vef_value<'a>(
-    object: &'a serde_json::Map<String, Value>,
-    key: &str,
-) -> Option<&'a Value> {
+/// An integer VEP keeps on `_variation_effect_feature_cache`. The nested value
+/// is parsed first; when it is absent or unparseable (null, non-numeric, out of
+/// range) the transcript's top-level value is used instead.
+fn json_promoted_vef_i32(object: &serde_json::Map<String, Value>, key: &str) -> Option<i32> {
     object
         .get("_variation_effect_feature_cache")
         .and_then(unwrap_blessed_object_optional)
-        .and_then(|vef_cache| vef_cache.get(key))
-        .or_else(|| object.get(key))
+        .and_then(|vef_cache| json_i32(vef_cache.get(key)))
+        .or_else(|| json_i32(object.get(key)))
 }
 
-fn storable_promoted_vef_value<'a>(
-    object: &'a std::collections::HashMap<String, SValue>,
+fn storable_promoted_vef_i32(
+    object: &std::collections::HashMap<String, SValue>,
     key: &str,
-) -> Option<&'a SValue> {
+) -> Option<i32> {
+    let parse = |value: Option<&SValue>| sv_i64(value).and_then(|v| i32::try_from(v).ok());
     object
         .get("_variation_effect_feature_cache")
         .and_then(SValue::as_hash)
-        .and_then(|vef_cache| vef_cache.get(key))
-        .or_else(|| object.get(key))
+        .and_then(|vef_cache| parse(vef_cache.get(key)))
+        .or_else(|| parse(object.get(key)))
 }
 
 fn json_sequence_value(value: Option<&Value>) -> Option<String> {
@@ -1620,10 +1619,7 @@ pub(crate) fn parse_transcript_line_into(
     // `_variation_effect_feature_cache` (BaseTranscriptVariation::_codon_table);
     // MT transcripts store "2" there as a string.
     if let Some(idx) = col_idx.codon_table {
-        batch.set_opt_i32(
-            idx,
-            json_i32(json_promoted_vef_value(object, "codon_table")),
-        );
+        batch.set_opt_i32(idx, json_promoted_vef_i32(object, "codon_table"));
     }
     // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     // Fall back to top-level "tsl" for forward-compat with future cache formats.
@@ -2180,11 +2176,7 @@ fn append_transcript_storable_row_into(
 
     // Simple scalar VEP fields
     if let Some(idx) = col_idx.codon_table {
-        batch.set_opt_i32(
-            idx,
-            sv_i64(storable_promoted_vef_value(object, "codon_table"))
-                .and_then(|v| i32::try_from(v).ok()),
-        );
+        batch.set_opt_i32(idx, storable_promoted_vef_i32(object, "codon_table"));
     }
     // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     if let Some(idx) = col_idx.tsl {
@@ -2735,6 +2727,20 @@ mod tests {
             "codon_table": 2
         });
         assert_eq!(json_line_codon_table(payload), Some(2));
+    }
+
+    #[test]
+    fn parse_transcript_line_falls_back_when_nested_codon_table_is_unusable() {
+        for nested in [json!(null), json!("standard")] {
+            let payload = json!({
+                "stable_id": "ENST00000361390",
+                "strand": 1,
+                "biotype": "protein_coding",
+                "codon_table": 2,
+                "_variation_effect_feature_cache": { "codon_table": nested }
+            });
+            assert_eq!(json_line_codon_table(payload), Some(2));
+        }
     }
 
     #[test]
