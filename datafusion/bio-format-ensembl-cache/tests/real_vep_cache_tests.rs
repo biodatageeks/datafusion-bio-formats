@@ -323,6 +323,19 @@ async fn real_transcript_vep_annotations() -> datafusion::common::Result<()> {
         "expected some canonical transcripts"
     );
 
+    // The codon table lives on `_variation_effect_feature_cache`; every
+    // nuclear transcript in a real cache carries the standard table there.
+    let batches = ctx
+        .sql("SELECT COUNT(*) FROM tx WHERE codon_table IS NULL OR codon_table <> 1")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        first_i64(&batches),
+        0,
+        "expected codon_table = 1 for every chr22 transcript"
+    );
+
     Ok(())
 }
 
