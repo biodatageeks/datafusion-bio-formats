@@ -43,6 +43,14 @@ fn single_sample_vcf() -> String {
     )
 }
 
+/// `;` separates nothing in a sample column, so it stays literal there.
+fn literal_format_semicolon_vcf() -> String {
+    format!(
+        "{HEADER}#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+         chr1\t100\trs1\tA\tT\t60\tPASS\t{INFO_1}\tGT:FS\t0/1:p;q\n"
+    )
+}
+
 fn multisample_vcf() -> String {
     format!(
         "{HEADER}#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
@@ -158,4 +166,11 @@ async fn the_reader_still_hands_out_decoded_values() {
         .to_string();
     assert!(formatted.contains("k=v"), "{formatted}");
     assert!(formatted.contains("50%"), "{formatted}");
+}
+
+#[tokio::test]
+async fn a_literal_semicolon_in_a_sample_value_stays_literal() {
+    let input = literal_format_semicolon_vcf();
+    let written = round_trip("format_semicolon", &input).await;
+    assert_eq!(body(&written), body(&input));
 }

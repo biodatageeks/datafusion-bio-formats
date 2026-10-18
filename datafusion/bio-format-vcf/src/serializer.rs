@@ -37,6 +37,8 @@ const FORMAT_RESERVED: &[u8] = b":%,";
 fn push_percent_encoded(buf: &mut String, value: &str, reserved: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let needs_escape = |b: u8| b < 0x20 || b == 0x7f || reserved.contains(&b);
+    // Fast path: no byte needs an escape. Bytes, not chars, are safe here: every
+    // byte of a multi-byte UTF-8 character is >= 0x80 and so never matches.
     if !value.bytes().any(needs_escape) {
         buf.push_str(value);
         return;
@@ -61,10 +63,11 @@ fn percent_encoded(value: &str, reserved: &[u8]) -> String {
 
 /// Whether an INFO column already holds joined VCF text to be written verbatim.
 ///
-/// A scalar string column declared with a Number other than 1 is one: the
-/// engine's CSQ, escaped by the VEP rules, with `,` between its blocks. The
-/// reader never produces that shape, since it reads such a field as a list, so
-/// no input value can bypass the encoding this way.
+/// A scalar string column declared `Number=.` is one: the annotation engine's
+/// CSQ, escaped by the VEP rules, with `,` between its blocks. The reader never
+/// produces that shape, since it reads a `Number=.` field as a list, so no input
+/// value can bypass the encoding this way. Only `.` qualifies: a scalar column
+/// declared `A`, `R` or `G` is still encoded.
 fn is_joined_info_text(field: &Field) -> bool {
     matches!(
         field.data_type(),
@@ -72,7 +75,7 @@ fn is_joined_info_text(field: &Field) -> bool {
     ) && field
         .metadata()
         .get(VCF_FIELD_NUMBER_KEY)
-        .is_some_and(|number| number != "1")
+        .is_some_and(|number| number == ".")
 }
 
 fn field_is_gt(field: &Field) -> bool {
@@ -1677,10 +1680,10 @@ mod tests {
         assert_eq!(info, "D=MedGen:C1|a\u{2013}b é");
     }
 
-    /// A scalar string column declared with a Number other than 1 already holds
-    /// joined VCF text — the engine's CSQ, escaped by the VEP rules, with `,`
-    /// between its blocks. The reader never produces that shape (it reads such a
-    /// field as a list), so writing it verbatim cannot skip an input value.
+    /// A scalar string column declared `Number=.` already holds joined VCF
+    /// text — the engine's CSQ, escaped by the VEP rules, with `,` between its
+    /// blocks. The reader never produces that shape (it reads such a field as a
+    /// list), so writing it verbatim cannot skip an input value.
     #[test]
     fn an_already_joined_scalar_column_is_written_verbatim() {
         let csq = "T|synonymous_variant|p.Ala125%3D|a=b,T|intron_variant||";
@@ -1689,6 +1692,19 @@ mod tests {
             Arc::new(StringArray::from(vec![Some(csq)])),
         );
         assert_eq!(info, format!("CSQ={csq}"));
+    }
+
+    /// Only `Number=.` marks joined text: a scalar declared with another
+    /// cardinality is an ordinary value and is encoded.
+    #[test]
+    fn a_scalar_column_declared_number_a_is_still_encoded() {
+        for number in ["A", "R", "G", "2"] {
+            let info = line_with_info_column(
+                with_number(Field::new("X", DataType::Utf8, true), number),
+                Arc::new(StringArray::from(vec![Some("a;b=c")])),
+            );
+            assert_eq!(info, "X=a%3Bb%3Dc", "Number={number}");
+        }
     }
 
     #[test]
