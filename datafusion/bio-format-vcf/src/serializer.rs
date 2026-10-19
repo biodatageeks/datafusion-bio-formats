@@ -773,7 +773,7 @@ pub fn batch_to_vcf_lines(
 /// `file_format`, as [`header_file_format`] gives it for the header's schema.
 ///
 /// The version decides which characters an INFO value has to escape: before
-/// VCF 4.3 a space is one of them (see [`INFO_RESERVED_BEFORE_4_3`]).
+/// VCF 4.3 a space is one of the reserved characters for this encoding.
 /// [`batch_to_vcf_lines`] writes under [`DEFAULT_VCF_FILE_FORMAT`].
 ///
 /// [`header_file_format`]: crate::header_builder::header_file_format
