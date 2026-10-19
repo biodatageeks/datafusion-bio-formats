@@ -467,6 +467,14 @@ fn derive_coding_region_from_translation_storable(
 /// Ensembl's `coding_region_start/end` arithmetic.  There is deliberately no
 /// check against the transcript span: Ensembl has none, so a bound outside it
 /// is VEP's bound and is kept.
+///
+/// The `min`/`max` at the end is not in Ensembl, which returns the pair as
+/// computed.  On well-formed data (every translated transcript of the pinned
+/// caches) start <= end already, so it is a no-op; on malformed data it keeps
+/// the pair ordered rather than crossing the bounds.
+///
+/// Returns `(Some, Some)` or `(None, None)`, never a mix, so callers may test
+/// either half for the fallback.
 fn compute_cds_from_translation_exons<T>(
     tl_start: Option<i64>,
     tl_end: Option<i64>,
@@ -1463,7 +1471,9 @@ pub(crate) fn parse_transcript_line_into(
         coding_region_end_val = derived_end;
         // Fallback: map cdna_coding_start/end through the raw exon array, for a
         // translation whose start_exon/end_exon did not survive storable alias
-        // eviction. This ignores RNA edits, so it is only a last resort.
+        // eviction. This ignores RNA edits, so it is only a last resort. The
+        // translation path yields both halves or neither, so testing the start
+        // is enough.
         if coding_region_start_val.is_none()
             && let Some(exon_coords) = extract_exon_coords_json(object)
         {
@@ -2021,7 +2031,9 @@ fn append_transcript_storable_row_into(
         coding_region_end_val = derived_end;
         // Fallback: map cdna_coding_start/end through the raw exon array, for a
         // translation whose start_exon/end_exon did not survive storable alias
-        // eviction. This ignores RNA edits, so it is only a last resort.
+        // eviction. This ignores RNA edits, so it is only a last resort. The
+        // translation path yields both halves or neither, so testing the start
+        // is enough.
         if coding_region_start_val.is_none()
             && let Some(exon_coords) = extract_exon_coords_storable(object)
         {
@@ -4019,6 +4031,10 @@ mod tests {
             json_cds_bounds(&out_of_span_case(1)),
             (Some(1050), Some(2149))
         );
+        assert_eq!(
+            json_cds_bounds(&out_of_span_case(-1)),
+            (Some(1050), Some(2149))
+        );
     }
 
     /// Without `translation.start_exon` (alias eviction) the translation method
@@ -4033,5 +4049,6 @@ mod tests {
         let mut minus = minus_strand_case();
         minus.with_start_exon = false;
         assert_eq!(storable_cds_bounds(&minus), (Some(1048), Some(2150)));
+        assert_eq!(json_cds_bounds(&minus), (Some(1048), Some(2150)));
     }
 }
