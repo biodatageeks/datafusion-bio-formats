@@ -1170,6 +1170,29 @@ fn storable_promoted_vef_sequence(
         .or_else(|| storable_sequence_value(object.get(key)))
 }
 
+/// An integer VEP keeps on `_variation_effect_feature_cache`. The nested value
+/// is parsed first; when it is absent or unparseable (null, non-numeric, out of
+/// range) the transcript's top-level value is used instead.
+fn json_promoted_vef_i32(object: &serde_json::Map<String, Value>, key: &str) -> Option<i32> {
+    object
+        .get("_variation_effect_feature_cache")
+        .and_then(unwrap_blessed_object_optional)
+        .and_then(|vef_cache| json_i32(vef_cache.get(key)))
+        .or_else(|| json_i32(object.get(key)))
+}
+
+fn storable_promoted_vef_i32(
+    object: &std::collections::HashMap<String, SValue>,
+    key: &str,
+) -> Option<i32> {
+    let parse = |value: Option<&SValue>| sv_i64(value).and_then(|v| i32::try_from(v).ok());
+    object
+        .get("_variation_effect_feature_cache")
+        .and_then(SValue::as_hash)
+        .and_then(|vef_cache| parse(vef_cache.get(key)))
+        .or_else(|| parse(object.get(key)))
+}
+
 fn json_sequence_value(value: Option<&Value>) -> Option<String> {
     let value = value?;
     json_str(Some(value)).or_else(|| {
@@ -1592,9 +1615,11 @@ pub(crate) fn parse_transcript_line_into(
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
 
-    // Simple scalar VEP fields
+    // Simple scalar VEP fields. VEP reads the codon table from
+    // `_variation_effect_feature_cache` (BaseTranscriptVariation::_codon_table);
+    // MT transcripts store "2" there as a string.
     if let Some(idx) = col_idx.codon_table {
-        batch.set_opt_i32(idx, json_i32(object.get("codon_table")));
+        batch.set_opt_i32(idx, json_promoted_vef_i32(object, "codon_table"));
     }
     // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     // Fall back to top-level "tsl" for forward-compat with future cache formats.
@@ -2151,10 +2176,7 @@ fn append_transcript_storable_row_into(
 
     // Simple scalar VEP fields
     if let Some(idx) = col_idx.codon_table {
-        batch.set_opt_i32(
-            idx,
-            sv_i64(object.get("codon_table")).and_then(|v| i32::try_from(v).ok()),
-        );
+        batch.set_opt_i32(idx, storable_promoted_vef_i32(object, "codon_table"));
     }
     // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     if let Some(idx) = col_idx.tsl {
@@ -2342,7 +2364,7 @@ mod tests {
     use crate::schema::transcript_schema;
     use crate::util::{BatchBuilder, ColumnMap, ProvenanceWriter, RefseqEditTuple};
     use datafusion::arrow::array::{
-        Array, BooleanArray, Int64Array, ListArray, StringArray, StructArray,
+        Array, BooleanArray, Int32Array, Int64Array, ListArray, StringArray, StructArray,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2422,6 +2444,26 @@ mod tests {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap_or_else(|| panic!("expected Int64 column: {col}"));
+        if values.is_null(0) {
+            None
+        } else {
+            Some(values.value(0))
+        }
+    }
+
+    fn batch_i32_value(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+        col: &str,
+    ) -> Option<i32> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name(col)
+            .unwrap_or_else(|| panic!("missing column: {col}"));
+        let values = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap_or_else(|| panic!("expected Int32 column: {col}"));
         if values.is_null(0) {
             None
         } else {
@@ -2638,6 +2680,67 @@ mod tests {
             batch_utf8_value(&batch, "five_prime_utr_seq").as_deref(),
             Some("GGCC")
         );
+    }
+
+    /// Parses one JSON transcript line and returns its `codon_table` value.
+    fn json_line_codon_table(payload: serde_json::Value) -> Option<i32> {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let line = format!(
+            "MT\t3307\t4262\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        assert!(written);
+        batch_i32_value(&batch.finish().unwrap(), "codon_table")
+    }
+
+    #[test]
+    fn parse_transcript_line_reads_codon_table_from_vef_cache() {
+        // VEP caches keep the codon table on `_variation_effect_feature_cache`,
+        // where BaseTranscriptVariation::_codon_table reads it. MT transcripts
+        // store it as the string "2".
+        let payload = json!({
+            "stable_id": "ENST00000361390",
+            "strand": 1,
+            "biotype": "protein_coding",
+            "_variation_effect_feature_cache": { "codon_table": "2" }
+        });
+        assert_eq!(json_line_codon_table(payload), Some(2));
+    }
+
+    #[test]
+    fn parse_transcript_line_falls_back_to_top_level_codon_table() {
+        let payload = json!({
+            "stable_id": "ENST00000361390",
+            "strand": 1,
+            "biotype": "protein_coding",
+            "codon_table": 2
+        });
+        assert_eq!(json_line_codon_table(payload), Some(2));
+    }
+
+    #[test]
+    fn parse_transcript_line_falls_back_when_nested_codon_table_is_unusable() {
+        for nested in [json!(null), json!("standard")] {
+            let payload = json!({
+                "stable_id": "ENST00000361390",
+                "strand": 1,
+                "biotype": "protein_coding",
+                "codon_table": 2,
+                "_variation_effect_feature_cache": { "codon_table": nested }
+            });
+            assert_eq!(json_line_codon_table(payload), Some(2));
+        }
     }
 
     #[test]
@@ -2945,6 +3048,50 @@ mod tests {
             extract_cdna_mapper_segments_storable(&object).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn append_transcript_storable_row_reads_codon_table_from_vef_cache() {
+        // MT transcripts store "2" as a string, nuclear ones 1 as an integer.
+        for (stored, expected) in [(SValue::String(Arc::from("2")), 2), (SValue::Int(1), 1)] {
+            let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
+            let mut vef_cache = HashMap::new();
+            vef_cache.insert("codon_table".to_string(), stored);
+            let mut object = HashMap::new();
+            object.insert(
+                "biotype".to_string(),
+                SValue::String(Arc::from("protein_coding")),
+            );
+            object.insert(
+                "_variation_effect_feature_cache".to_string(),
+                SValue::Hash(Arc::new(vef_cache)),
+            );
+            let payload = SValue::Hash(Arc::new(object.clone()));
+            let core = TranscriptRowCore {
+                chrom: "MT".to_string(),
+                start: 3307,
+                end: 4262,
+                source_start: 3307,
+                source_end: 4262,
+                strand: 1,
+                stable_id: "ENST00000361390".to_string(),
+            };
+            append_transcript_storable_row_into(
+                &payload,
+                &object,
+                core,
+                false,
+                "/tmp/transcript.storable.gz",
+                &mut batch,
+                &col_idx,
+                &provenance,
+            )
+            .unwrap();
+            assert_eq!(
+                batch_i32_value(&batch.finish().unwrap(), "codon_table"),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
