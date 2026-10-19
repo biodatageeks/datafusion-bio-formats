@@ -941,8 +941,20 @@ async fn transcript_parquet_roundtrip_translation_seq_edits() -> datafusion::com
                     .as_any()
                     .downcast_ref::<StringArray>()
                     .unwrap();
+                let code = s
+                    .column_by_name("code")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
                 let start = s
                     .column_by_name("start")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let end = s
+                    .column_by_name("end")
                     .unwrap()
                     .as_any()
                     .downcast_ref::<Int64Array>()
@@ -950,7 +962,12 @@ async fn transcript_parquet_roundtrip_translation_seq_edits() -> datafusion::com
                 (0..s.len())
                     .map(|j| {
                         assert!(!alt.is_null(j));
-                        (start.value(j), alt.value(j).to_string())
+                        (
+                            code.value(j).to_string(),
+                            start.value(j),
+                            end.value(j),
+                            alt.value(j).to_string(),
+                        )
                     })
                     .collect::<Vec<_>>()
             });
@@ -963,13 +980,18 @@ async fn transcript_parquet_roundtrip_translation_seq_edits() -> datafusion::com
         vec![
             (
                 "ENST00000361453".to_string(),
-                Some(vec![(1, "M".to_string())])
+                Some(vec![("amino_acid_sub".to_string(), 1, 1, "M".to_string())])
             ),
             ("ENST00000387314".to_string(), None),
             ("ND2".to_string(), Some(vec![])),
             (
                 "NM_001315491.2".to_string(),
-                Some(vec![(249, String::new())])
+                Some(vec![(
+                    "amino_acid_sub".to_string(),
+                    249,
+                    249,
+                    String::new()
+                )])
             ),
         ]
     );

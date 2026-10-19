@@ -1067,7 +1067,9 @@ impl AnyBuilder {
                     Field::new("end", DataType::Int64, false),
                     Field::new("alt_seq", DataType::Utf8, false),
                 ];
-                // Edits are rare (~650 of ~1.2M transcripts), so start small.
+                // Edits are rare (~650 of ~1.2M transcripts), so start small. Byte
+                // capacity: `code` is up to 15 bytes (`_selenocysteine`), while
+                // `alt_seq` is 0 or 1 residue.
                 let struct_builder = StructBuilder::new(
                     fields,
                     vec![
