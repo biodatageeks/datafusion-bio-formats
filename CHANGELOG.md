@@ -67,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ensembl cache transcripts gain a `translation_seq_edits` column,
+  `List<Struct<code, start, end, alt_seq>>`, read from
+  `_variation_effect_feature_cache->{seq_edits}`: the translation SeqEdits
+  (`initial_met`, `_selenocysteine`, `amino_acid_sub`, `_stop_codon_rt`) that
+  VEP applies to the reference peptide. It is the only offline copy, since the
+  VEP dumper deletes the translation's attributes. NULL when the key is absent
+  (untranslated transcripts), `[]` when present and empty; entries keep source
+  order and an empty `alt_seq` stays `""`. The column is additive and nothing
+  reads it yet (biodatageeks/vepyr#241, #205).
 - `gzip_multi_member_decoder` helper in `bio-format-core` for multi-member gzip decoding
 - CRAM file format support with reference-based compression
 - FASTA file format support for biological sequences
