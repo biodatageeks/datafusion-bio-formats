@@ -1024,11 +1024,14 @@ async fn get_indexed_stream(
                 };
             }
 
-            // Lazily read the BAI at most once per partition — only if an
-            // unmapped-tail region is actually encountered — and reuse it across
-            // all such regions (avoids re-reading the full index per region while
-            // not penalizing the common no-unmapped-tail case).
-            let mut bai_index: Option<bam::bai::Index> = None;
+            // Cache the generic BAM index only for the global no-coor metadata hint.
+            // Per-reference BAI tails need the concrete BAI bins, which the shared
+            // BinningIndex trait does not expose.
+            let mut bam_index: Option<Box<dyn noodles_csi::BinningIndex + Send + Sync>> = None;
+            // Cache concrete per-reference tail seek points so multiple synthetic tails
+            // do not reread and reparse the full BAI/CSI sidecar.
+            let mut bam_tail_seek_positions:
+                Option<Vec<Option<noodles_bgzf::VirtualPosition>>> = None;
 
             for region in &regions {
                 // Handle unmapped tail regions via direct BGZF seek —
@@ -1036,21 +1039,21 @@ async fn get_indexed_stream(
                 if region.unmapped_tail {
                     // Dedicated partition for global no-coor records (n_no_coor).
                     if region.chrom == UNPLACED_UNMAPPED_SENTINEL_CHROM {
-                        if bai_index.is_none() {
-                            bai_index = Some(bam::bai::fs::read(&index_path).map_err(|e| {
+                        if bam_index.is_none() {
+                            bam_index = Some(crate::storage::read_bam_index(&index_path).map_err(|e| {
                                 DataFusionError::Execution(format!(
-                                    "Failed to read BAI for unplaced/unmapped tail: {e}"
+                                    "Failed to read BAM index for unplaced/unmapped tail: {e}"
                                 ))
                             })?);
                         }
-                        let no_coor_index = bai_index.as_ref().unwrap();
+                        let no_coor_index = bam_index.as_ref().unwrap();
                         let no_coor_hint =
                             no_coor_index.unplaced_unmapped_record_count().unwrap_or(0);
                         if no_coor_hint == 0 {
                             continue;
                         }
 
-                        // Open a plain (Send) reader; the concrete BAI index above is only
+                        // Open a plain (Send) reader; the index above is only
                         // needed for the no-coor hint, not for the record scan.
                         let (mut no_coor_reader, _no_coor_header) = open_local_bam_sync(&file_path)
                             .map_err(|e| {
@@ -1130,15 +1133,6 @@ async fn get_indexed_stream(
 
                     // Per-reference unmapped tail (reference_sequence_id set,
                     // alignment_start absent).
-                    if bai_index.is_none() {
-                        bai_index = Some(bam::bai::fs::read(&index_path).map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "Failed to read BAI for unmapped tail: {e}"
-                            ))
-                        })?);
-                    }
-                    let unmapped_index = bai_index.as_ref().unwrap();
-
                     let ref_idx =
                         names
                             .iter()
@@ -1150,35 +1144,72 @@ async fn get_indexed_stream(
                                 ))
                             })?;
 
-                    let seek_pos = {
-                        let ref_seq = unmapped_index
-                            .reference_sequences()
-                            .get(ref_idx)
-                            .ok_or_else(|| {
+                    // The shared BinningIndex trait does not expose bins, so read the
+                    // concrete index once and cache each reference's direct tail seek.
+                    if bam_tail_seek_positions.is_none() {
+                        let positions = if index_path.ends_with(".csi") {
+                            let index = noodles_csi::fs::read(&index_path).map_err(|e| {
                                 DataFusionError::Execution(format!(
-                                    "Reference index {ref_idx} not found in BAI index"
+                                    "Failed to read CSI for unmapped tails: {e}"
                                 ))
                             })?;
-
-                        ref_seq
-                            .bins()
-                            .values()
-                            .flat_map(|bin| bin.chunks())
-                            .map(|chunk| chunk.end())
-                            .max()
+                            index
+                                .reference_sequences()
+                                .iter()
+                                .map(|ref_seq| {
+                                    ref_seq
+                                        .bins()
+                                        .values()
+                                        .flat_map(|bin| bin.chunks())
+                                        .map(|chunk| chunk.end())
+                                        .max()
+                                })
+                                .collect()
+                        } else {
+                            let index = bam::bai::fs::read(&index_path).map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "Failed to read BAI for unmapped tails: {e}"
+                                ))
+                            })?;
+                            index
+                                .reference_sequences()
+                                .iter()
+                                .map(|ref_seq| {
+                                    ref_seq
+                                        .bins()
+                                        .values()
+                                        .flat_map(|bin| bin.chunks())
+                                        .map(|chunk| chunk.end())
+                                        .max()
+                                })
+                                .collect()
+                        };
+                        bam_tail_seek_positions = Some(positions);
                     }
-                    .or_else(|| unmapped_index.last_first_record_start_position())
-                    .unwrap_or_default();
+                    let seek_pos = bam_tail_seek_positions
+                        .as_ref()
+                        .and_then(|positions| positions.get(ref_idx))
+                        .copied()
+                        .ok_or_else(|| {
+                            DataFusionError::Execution(format!(
+                                "Reference index {ref_idx} not found in BAM index"
+                            ))
+                        })?;
 
-                    // Open a plain (Send) reader; the concrete BAI index above is only
-                    // needed to compute the seek position, not for the record scan.
+                    // Open a plain reader; the index is only needed to compute the
+                    // seek position, not for the record scan.
                     let (mut unmapped_reader, _unmapped_header) = open_local_bam_sync(&file_path)
                         .map_err(|e| {
                             DataFusionError::Execution(format!("Failed to open BAM file: {e}"))
                         })?;
-                    unmapped_reader.get_mut().seek(seek_pos).map_err(|e| {
-                        DataFusionError::Execution(format!("BGZF seek failed: {e}"))
-                    })?;
+                    if let Some(seek_pos) = seek_pos {
+                        unmapped_reader.get_mut().seek(seek_pos).map_err(|e| {
+                            DataFusionError::Execution(format!("BGZF seek failed: {e}"))
+                        })?;
+                    }
+                    // If no chunk exists (possible for CSI references), keep the reader
+                    // after the consumed BAM header and scan from the first alignment.
+                    // This is correct but may rescan the file for each such tail.
 
                     let mut unmapped_buf = bam::Record::default();
                     let mut unmapped_count: usize = 0;

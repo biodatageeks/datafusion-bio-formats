@@ -9,7 +9,7 @@ use noodles_bam::Record;
 use noodles_bam::io::Reader;
 use noodles_bgzf::r#async::io::Reader as AsyncBgzfReader;
 use noodles_bgzf::io::Reader as BgzfReader;
-use noodles_csi::binning_index::BinningIndex as _;
+use noodles_csi::BinningIndex;
 use noodles_csi::binning_index::ReferenceSequence as BinningRefSeq;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
@@ -262,18 +262,26 @@ impl SamReader {
 
 /// A local indexed BAM reader for region-based queries.
 ///
-/// Holds a plain BGZF-backed BAM reader plus a concrete BAI index to support
-/// random-access queries. This is used when an index file is available and genomic
-/// region filters are present.
-///
-/// Unlike noodles' `IndexedReader` (which stores the index as a non-`Send`
-/// `Box<dyn BinningIndex>`), this keeps the concrete `noodles_bam::bai::Index` so the
-/// reader is `Send`. That lets the indexed scan decode inline on the consuming tokio
-/// worker via `async_stream::try_stream!` instead of a dedicated reader thread.
+/// Holds a plain BGZF-backed BAM reader and a `Send + Sync` trait object index for
+/// random-access queries. The trait object supports both BAI and CSI while allowing
+/// indexed scans to decode inline on the consuming tokio worker.
 pub struct IndexedBamReader {
     reader: bam::io::Reader<noodles_bgzf::io::Reader<File>>,
-    index: bam::bai::Index,
+    index: Box<dyn BinningIndex + Send + Sync>,
     header: sam::Header,
+}
+
+/// Read a BAM index using its sidecar extension.
+///
+/// BAM indexes can be BAI or CSI. The latter is required for references longer
+/// than 2^29 bases, so treating every discovered index as BAI makes those BAMs
+/// unreadable even for full scans.
+pub fn read_bam_index(index_path: &str) -> Result<Box<dyn BinningIndex + Send + Sync>, Error> {
+    if index_path.ends_with(".csi") {
+        Ok(Box::new(noodles_csi::fs::read(index_path)?))
+    } else {
+        Ok(Box::new(bam::bai::fs::read(index_path)?))
+    }
 }
 
 impl IndexedBamReader {
@@ -281,9 +289,9 @@ impl IndexedBamReader {
     ///
     /// # Arguments
     /// * `file_path` - Path to the BAM file
-    /// * `index_path` - Path to the BAI index file
+    /// * `index_path` - Path to the BAI or CSI index file
     pub fn new(file_path: &str, index_path: &str) -> Result<Self, Error> {
-        let index = bam::bai::fs::read(index_path)?;
+        let index = read_bam_index(index_path)?;
         let inner = BgzfReader::new(File::open(file_path)?);
         let mut reader = bam::io::Reader::from(inner);
         let header = reader.read_header()?;
@@ -322,43 +330,85 @@ impl IndexedBamReader {
     }
 }
 
-/// Estimate compressed byte sizes per region from a BAI index.
+/// Estimate compressed byte sizes per region from a BAI or CSI index.
 ///
-/// Reads the BAI index and estimates the compressed byte range for each genomic region
-/// by examining the chunks in each reference's bins. Uses `VirtualPosition.compressed()`
-/// to find the min/max compressed offsets per reference.
+/// Estimates each region by examining the chunks and bins in the selected index.
 ///
 /// # Arguments
-/// * `index_path` - Path to the BAI index file
+/// * `index_path` - Path to the BAI or CSI index file
 /// * `regions` - Genomic regions to estimate sizes for
 /// * `reference_names` - Reference sequence names from the header (in order)
 /// * `reference_lengths` - Optional reference sequence lengths (for sub-region splitting)
-pub fn estimate_sizes_from_bai(
+pub fn estimate_sizes_from_index(
     index_path: &str,
     regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
     reference_names: &[String],
     reference_lengths: &[u64],
 ) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    if index_path.ends_with(".csi") {
+        match noodles_csi::fs::read(index_path) {
+            Ok(index) => estimate_sizes_from_binning_index(
+                &index,
+                regions,
+                reference_names,
+                reference_lengths,
+            ),
+            Err(e) => {
+                log::debug!("Failed to read CSI index for size estimation: {e}");
+                empty_size_estimates(regions)
+            }
+        }
+    } else {
+        match bam::bai::fs::read(index_path) {
+            Ok(index) => estimate_sizes_from_binning_index(
+                &index,
+                regions,
+                reference_names,
+                reference_lengths,
+            ),
+            Err(e) => {
+                log::debug!("Failed to read BAI index for size estimation: {e}");
+                empty_size_estimates(regions)
+            }
+        }
+    }
+}
+
+fn empty_size_estimates(
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
     use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
 
-    let index = match bam::bai::fs::read(index_path) {
-        Ok(idx) => idx,
-        Err(e) => {
-            log::debug!("Failed to read BAI index for size estimation: {e}");
-            // Return uniform estimates as fallback
-            return regions
-                .iter()
-                .map(|r| RegionSizeEstimate {
-                    region: r.clone(),
-                    estimated_bytes: 1,
-                    contig_length: None,
-                    unmapped_count: 0,
-                    nonempty_bin_positions: Vec::new(),
-                    leaf_bin_span: 0,
-                })
-                .collect();
-        }
-    };
+    regions
+        .iter()
+        .map(|r| RegionSizeEstimate {
+            region: r.clone(),
+            estimated_bytes: 1,
+            contig_length: None,
+            unmapped_count: 0,
+            nonempty_bin_positions: Vec::new(),
+            leaf_bin_span: 0,
+        })
+        .collect()
+}
+
+fn estimate_sizes_from_binning_index<I>(
+    index: &noodles_csi::binning_index::index::Index<I>,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    reference_names: &[String],
+    reference_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate>
+where
+    I: noodles_csi::binning_index::index::reference_sequence::index::Index,
+{
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+    use noodles_csi::binning_index::BinningIndex;
+
+    let min_shift = index.min_shift();
+    let depth = index.depth();
+    let leaf_bin_first = ((1usize << (depth * 3)) - 1) / 7;
+    let leaf_bin_last = leaf_bin_first + (1usize << (depth * 3)) - 1;
+    let leaf_bin_span = 1u64 << min_shift;
 
     let ref_name_to_idx: std::collections::HashMap<&str, usize> = reference_names
         .iter()
@@ -403,12 +453,6 @@ pub fn estimate_sizes_from_bai(
                 })
                 .unwrap_or(0);
 
-            // Collect non-empty leaf bin positions for data-aware splitting.
-            // BAI leaf bins are level-5 bins (IDs 4681..=37448), each covering 16384 bp.
-            const BAI_LEAF_FIRST: usize = 4681;
-            const BAI_LEAF_LAST: usize = 37448;
-            const BAI_LEAF_SPAN: u64 = 16384;
-
             let mut nonempty_bin_positions: Vec<u64> = ref_idx
                 .and_then(|idx| index.reference_sequences().get(idx))
                 .map(|ref_seq| {
@@ -416,8 +460,8 @@ pub fn estimate_sizes_from_bai(
                         .bins()
                         .keys()
                         .copied()
-                        .filter(|&bin_id| (BAI_LEAF_FIRST..=BAI_LEAF_LAST).contains(&bin_id))
-                        .map(|bin_id| ((bin_id - BAI_LEAF_FIRST) as u64) * BAI_LEAF_SPAN + 1)
+                        .filter(|&bin_id| (leaf_bin_first..=leaf_bin_last).contains(&bin_id))
+                        .map(|bin_id| ((bin_id - leaf_bin_first) as u64) * leaf_bin_span + 1)
                         .collect()
                 })
                 .unwrap_or_default();
@@ -429,7 +473,7 @@ pub fn estimate_sizes_from_bai(
                 contig_length,
                 unmapped_count,
                 nonempty_bin_positions,
-                leaf_bin_span: BAI_LEAF_SPAN,
+                leaf_bin_span,
             }
         })
         .collect()
@@ -439,11 +483,11 @@ pub fn estimate_sizes_from_bai(
 ///
 /// This count represents records with `reference_sequence_id = None` and no alignment
 /// position. These records are not returned by per-reference range queries.
-pub fn unplaced_unmapped_count_from_bai(index_path: &str) -> u64 {
-    match bam::bai::fs::read(index_path) {
+pub fn unplaced_unmapped_count_from_index(index_path: &str) -> u64 {
+    match read_bam_index(index_path) {
         Ok(index) => index.unplaced_unmapped_record_count().unwrap_or(0),
         Err(e) => {
-            log::debug!("Failed to read BAI index for unplaced/unmapped count: {e}");
+            log::debug!("Failed to read BAM index for unplaced/unmapped count: {e}");
             0
         }
     }
