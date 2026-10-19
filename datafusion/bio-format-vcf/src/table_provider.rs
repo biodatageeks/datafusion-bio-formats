@@ -15,10 +15,11 @@ use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_INDEXED_KEY, VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY,
     VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY,
-    VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_FORMAT_KEYS_COLUMN,
+    VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_FORMAT_RAW_COLUMN,
     VCF_GENOTYPE_COUNTED_ALLELE_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY,
-    VCF_HEADER_RAW_LINES_KEY, VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS,
-    VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
+    VCF_HEADER_RAW_LINES_KEY, VCF_INFO_KEYS_COLUMN, VCF_INFO_RAW_COLUMN,
+    VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_FORMAT_RAW, VCF_RECORD_LAYOUT_INFO_KEYS,
+    VCF_RECORD_LAYOUT_INFO_RAW, VCF_RECORD_LAYOUT_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
     from_json_string, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
@@ -587,7 +588,10 @@ impl VcfTableProvider {
         // reserved name. That column is data, not plumbing, and appending a
         // second column with the same name would make every by-name lookup
         // ambiguous — so refuse rather than corrupt the round trip.
-        let collisions = RecordLayoutColumns::source_collisions(&self.schema);
+        let collisions = RecordLayoutColumns::source_collisions(
+            &self.schema,
+            &[VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN],
+        );
         if !collisions.is_empty() {
             return Err(datafusion::common::DataFusionError::Plan(format!(
                 "the source VCF declares {} as its own field, and carrying the \
@@ -622,6 +626,79 @@ impl VcfTableProvider {
             // The marker, not the name, is what identifies these downstream: a
             // source VCF may declare a field with either name, and that field
             // is data.
+            fields.push(Arc::new(
+                Field::new(name, DataType::Utf8, true).with_metadata(HashMap::from([(
+                    VCF_RECORD_LAYOUT_KEY.to_string(),
+                    role.to_string(),
+                )])),
+            ));
+        }
+        self.schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            self.schema.metadata().clone(),
+        ));
+        Ok(self)
+    }
+
+    /// Carries the source text of the INFO entries and sample values that the
+    /// writer would not reproduce from their parsed values, in two more `Utf8`
+    /// columns, `_vcf_info_raw` and `_vcf_format_raw` (biodatageeks/vepyr#252).
+    ///
+    /// The reader decodes percent escapes, and decoding loses information:
+    /// `%2B` and `+` parse to the same `+`, `%3b` and `%3B` to the same `;`, and
+    /// `50%` and `50%25` to the same `50%`. The writer re-encodes only what VCF
+    /// reserves, so it cannot know which of those the source had, and it would
+    /// also escape a literal `=` or a `,` in a single-value String. A value is
+    /// carried only when its text holds a byte that makes this matter (`%`, a
+    /// control, a `,` in a single-value String and, in INFO, `=` and a space),
+    /// so the columns are null for almost every record, and for every record of
+    /// a file with no such byte.
+    ///
+    /// A writer given these columns writes the source text for a value that
+    /// still decodes to it, and encodes any other. An unchanged value therefore
+    /// comes back byte for byte, as Ensembl VEP writes it by copying the input
+    /// line, and a value changed after the read is never written with stale
+    /// text.
+    ///
+    /// Requires [`Self::with_record_layout`], since the text is only meaningful
+    /// with the record's own key order. Off by default, apart from that.
+    pub fn with_raw_values(mut self) -> datafusion::common::Result<Self> {
+        let existing = RecordLayoutColumns::locate(&self.schema);
+        if existing.info_keys.is_none() || existing.format_keys.is_none() {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "carrying the source text of values needs the record layout; \
+                 call with_record_layout first"
+                    .to_string(),
+            ));
+        }
+        let collisions = RecordLayoutColumns::source_collisions(
+            &self.schema,
+            &[VCF_INFO_RAW_COLUMN, VCF_FORMAT_RAW_COLUMN],
+        );
+        if !collisions.is_empty() {
+            return Err(datafusion::common::DataFusionError::Plan(format!(
+                "the source VCF declares {} as its own field, and carrying the \
+                 source text of values needs that name; read it without it",
+                collisions.join(" and ")
+            )));
+        }
+        match (existing.info_raw, existing.format_raw) {
+            (Some(_), Some(_)) => return Ok(self),
+            (None, None) => {}
+            _ => {
+                return Err(datafusion::common::DataFusionError::Plan(format!(
+                    "schema already carries one of `{VCF_INFO_RAW_COLUMN}` / \
+                     `{VCF_FORMAT_RAW_COLUMN}` but not the other; \
+                     the source text needs both or neither"
+                )));
+            }
+        }
+
+        let mut fields = self.schema.fields().to_vec();
+        for (name, role) in [
+            (VCF_INFO_RAW_COLUMN, VCF_RECORD_LAYOUT_INFO_RAW),
+            (VCF_FORMAT_RAW_COLUMN, VCF_RECORD_LAYOUT_FORMAT_RAW),
+        ] {
             fields.push(Arc::new(
                 Field::new(name, DataType::Utf8, true).with_metadata(HashMap::from([(
                     VCF_RECORD_LAYOUT_KEY.to_string(),

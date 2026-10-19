@@ -103,6 +103,29 @@ pub const VCF_RECORD_LAYOUT_INFO_KEYS: &str = "info_keys";
 /// Value of [`VCF_RECORD_LAYOUT_KEY`] on the FORMAT key-list column.
 pub const VCF_RECORD_LAYOUT_FORMAT_KEYS: &str = "format_keys";
 
+/// Column holding the source text of a record's INFO entries that the writer
+/// would not reproduce from the parsed value, as `key=value` substrings joined
+/// with `;`. Null for a record with none, which is almost every record.
+///
+/// The reader decodes percent escapes, so the parsed value of `X=a%2Bb` is the
+/// same as that of `X=a+b`, and `50%` the same as `50%25`. A writer handed this
+/// column writes the source text for a key whose value still decodes to it,
+/// which leaves an unchanged entry byte-identical to the input, as Ensembl VEP
+/// does by copying the input line (biodatageeks/vepyr#252).
+pub const VCF_INFO_RAW_COLUMN: &str = "_vcf_info_raw";
+
+/// Column holding the source text of a record's sample values that the writer
+/// would not reproduce from the parsed value, as `sample:key:value` entries
+/// joined with a tab, `sample` being the value's position among the samples
+/// read. Null for a record with none.
+pub const VCF_FORMAT_RAW_COLUMN: &str = "_vcf_format_raw";
+
+/// Value of [`VCF_RECORD_LAYOUT_KEY`] on the INFO source-text column.
+pub const VCF_RECORD_LAYOUT_INFO_RAW: &str = "info_raw";
+
+/// Value of [`VCF_RECORD_LAYOUT_KEY`] on the sample source-text column.
+pub const VCF_RECORD_LAYOUT_FORMAT_RAW: &str = "format_raw";
+
 /// The source file's `##` header lines, verbatim and in file order, stored as a
 /// JSON array of strings (the `#CHROM` column line is not included).
 ///

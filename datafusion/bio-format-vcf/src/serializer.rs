@@ -14,7 +14,8 @@ use datafusion_bio_format_core::{
     GENOTYPE_OUTPUT_MODE_KEY,
     metadata::{
         VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY,
-        VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+        VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_FORMAT_RAW, VCF_RECORD_LAYOUT_INFO_KEYS,
+        VCF_RECORD_LAYOUT_INFO_RAW, VCF_RECORD_LAYOUT_KEY,
     },
 };
 
@@ -148,6 +149,15 @@ enum InfoEncoding {
 }
 
 impl InfoEncoding {
+    /// [`reencoded_raw`] with this column's encoding.
+    fn reencoded_raw(self, raw: &str, list: bool) -> Option<String> {
+        match self {
+            Self::Verbatim => reencoded_raw(raw, list, None::<&[u8; 0]>),
+            Self::Reserved => reencoded_raw(raw, list, Some(INFO_RESERVED)),
+            Self::ReservedAndSpace => reencoded_raw(raw, list, Some(INFO_RESERVED_BEFORE_4_3)),
+        }
+    }
+
     fn value_string(self, array: &dyn Array, row: usize) -> Result<Option<String>> {
         match self {
             Self::Verbatim => extract_info_value_string(array, row, None::<&[u8; 0]>),
@@ -157,6 +167,104 @@ impl InfoEncoding {
             }
         }
     }
+}
+
+/// `raw` percent-decoded exactly as the reader decodes a value: `%` and two hex
+/// digits of either case become that byte, and any other byte, a `%` that
+/// starts no escape included, stays as it is. `None` when the bytes are not
+/// UTF-8, which the reader would have refused, so such text never matches.
+fn percent_decoded(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let hex = |b: u8| (b as char).to_digit(16);
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2))
+            && let (Some(hi), Some(lo)) = (hex(hi), hex(lo))
+        {
+            decoded.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// The text the writer produces for the value whose source text is `raw`:
+/// `raw` decoded as the reader decodes it, then encoded with `reserved`. A
+/// list is split on its literal commas first and each element taken on its
+/// own, `.` being a missing element, as the reader splits it.
+///
+/// Percent encoding maps distinct values to distinct text, so this equals what
+/// the writer made of a value exactly when that value is the one `raw` reads
+/// as. That is the test for writing `raw` instead (biodatageeks/vepyr#252):
+/// it holds for a value nobody changed after the read, and fails for one that
+/// was changed, which is then encoded rather than written with stale text.
+fn reencoded_raw<const N: usize>(
+    raw: &str,
+    list: bool,
+    reserved: Option<&[u8; N]>,
+) -> Option<String> {
+    if !list {
+        return percent_decoded(raw).map(|value| string_value(&value, reserved));
+    }
+    let mut text = String::with_capacity(raw.len());
+    for (i, element) in raw.split(',').enumerate() {
+        if i > 0 {
+            text.push(',');
+        }
+        if element == "." {
+            text.push('.');
+        } else {
+            text.push_str(&string_value(&percent_decoded(element)?, reserved));
+        }
+    }
+    Some(text)
+}
+
+/// Whether a column of `data_type` holds one string (`Some(false)`) or a list
+/// of strings (`Some(true)`) per value. Only those can have a carried source
+/// text: numbers and flags never reach the writer through a decode.
+fn string_shape(data_type: &DataType) -> Option<bool> {
+    match data_type {
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Some(false),
+        DataType::List(item) | DataType::LargeList(item) => matches!(
+            item.data_type(),
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+        )
+        .then_some(true),
+        _ => None,
+    }
+}
+
+/// The carried source text of one record's INFO entries, `key=value` joined
+/// with `;`, as `(key, value)` pairs.
+fn split_info_raw(raw: &str) -> impl Iterator<Item = (&str, &str)> {
+    raw.split(';').filter_map(|entry| entry.split_once('='))
+}
+
+/// The carried source text of one record's sample values, `sample:key:value`
+/// joined with a tab, as `(sample, key, value)`.
+fn split_format_raw(raw: &str) -> impl Iterator<Item = (usize, &str, &str)> {
+    raw.split('\t').filter_map(|entry| {
+        let mut parts = entry.splitn(3, ':');
+        let sample = parts.next()?.parse().ok()?;
+        Some((sample, parts.next()?, parts.next()?))
+    })
+}
+
+/// The carried source text of `key` for the sample at `sample`, if any.
+fn format_raw_value<'a>(
+    raw: &[(usize, &'a str, &'a str)],
+    sample: usize,
+    key: &str,
+) -> Option<&'a str> {
+    raw.iter()
+        .find(|(s, k, _)| *s == sample && *k == key)
+        .map(|(_, _, value)| *value)
 }
 
 /// Whether an INFO column already holds joined VCF text to be written verbatim.
@@ -582,6 +690,23 @@ impl ResolvedFieldData<'_> {
         }
     }
 
+    /// One string (`Some(false)`) or a list of strings (`Some(true)`) per
+    /// sample, as [`string_shape`] decides for a column.
+    fn string_shape(&self) -> Option<bool> {
+        let values = match self {
+            ResolvedFieldData::List { values, .. }
+            | ResolvedFieldData::LargeList { values, .. } => values,
+            ResolvedFieldData::Missing => return None,
+        };
+        match values {
+            TypedValues::Utf8(_) | TypedValues::LargeUtf8(_) | TypedValues::Utf8View(_) => {
+                Some(false)
+            }
+            TypedValues::Other(array) => string_shape(array.data_type()),
+            _ => None,
+        }
+    }
+
     /// Writes a single sample's value directly to the line buffer.
     fn write_value(&self, row: usize, sample_idx: usize, buf: &mut String) -> Result<()> {
         match self {
@@ -628,11 +753,15 @@ impl ResolvedFieldData<'_> {
 /// key whose value is missing in every sample. Without it the keys come from
 /// the schema and an all-missing one is dropped, because nothing distinguishes
 /// it from a key the record never had.
+///
+/// `raw` is the record's carried source text of sample values: a value that
+/// still reads as its text is written with it (see [`reencoded_raw`]).
 fn write_resolved_format_and_samples(
     resolved: &ResolvedGenotypes,
     row: usize,
     num_samples: usize,
     carried_keys: Option<&str>,
+    raw: &[(usize, &str, &str)],
     line: &mut String,
 ) -> Result<()> {
     if resolved.struct_array.is_null(row) {
@@ -697,7 +826,17 @@ fn write_resolved_format_and_samples(
             if n > 0 {
                 line.push(':');
             }
-            resolved.fields[i].data.write_value(row, sample_idx, line)?;
+            let field = &resolved.fields[i];
+            let start = line.len();
+            field.data.write_value(row, sample_idx, line)?;
+            if let Some(source) = format_raw_value(raw, sample_idx, field.name)
+                && let Some(list) = field.data.string_shape()
+                && reencoded_raw(source, list, Some(FORMAT_RESERVED)).as_deref()
+                    == Some(&line[start..])
+            {
+                line.truncate(start);
+                line.push_str(source);
+            }
         }
     }
 
@@ -803,6 +942,10 @@ pub fn batch_to_vcf_lines_for_file_format(
     let info_fields = info_fields.as_slice();
     let carried_info_keys = carried_layout_column(batch, VCF_RECORD_LAYOUT_INFO_KEYS)?;
     let carried_format_keys = carried_layout_column(batch, VCF_RECORD_LAYOUT_FORMAT_KEYS)?;
+    let carried_info_raw = carried_layout_column(batch, VCF_RECORD_LAYOUT_INFO_RAW)?;
+    let carried_format_raw = carried_layout_column(batch, VCF_RECORD_LAYOUT_FORMAT_RAW)?;
+    let mut info_raw: Vec<(&str, &str)> = Vec::new();
+    let mut format_raw: Vec<(usize, &str, &str)> = Vec::new();
 
     // Look up core columns by name
     let chroms = get_string_column_by_name(batch, "chrom")?;
@@ -913,7 +1056,18 @@ pub fn batch_to_vcf_lines_for_file_format(
             }
             None => field_order.extend(info_fields.iter().map(String::as_str)),
         }
-        let info_str = build_info_string(batch, row, &field_order, carried_count, &info_columns)?;
+        info_raw.clear();
+        if let Some(raw) = carried_info_raw.as_ref().and_then(|col| value_at(col, row)) {
+            info_raw.extend(split_info_raw(raw));
+        }
+        let info_str = build_info_string(
+            batch,
+            row,
+            &field_order,
+            carried_count,
+            &info_columns,
+            &info_raw,
+        )?;
 
         // Build the VCF line
         let mut line = format!(
@@ -924,12 +1078,20 @@ pub fn batch_to_vcf_lines_for_file_format(
         let row_format_keys = carried_format_keys
             .as_ref()
             .and_then(|col| value_at(col, row));
+        format_raw.clear();
+        if let Some(raw) = carried_format_raw
+            .as_ref()
+            .and_then(|col| value_at(col, row))
+        {
+            format_raw.extend(split_format_raw(raw));
+        }
         if let Some(ref resolved) = resolved_genotypes {
             write_resolved_format_and_samples(
                 resolved,
                 row,
                 num_samples,
                 row_format_keys,
+                &format_raw,
                 &mut line,
             )?;
         } else if !sample_names.is_empty() && !format_fields.is_empty() {
@@ -940,6 +1102,7 @@ pub fn batch_to_vcf_lines_for_file_format(
                 sample_names,
                 format_columns.as_ref(),
                 row_format_keys,
+                &format_raw,
             )?;
             if !format_str.is_empty() {
                 line.push('\t');
@@ -1159,12 +1322,16 @@ fn build_format_column_map(
 /// they are present by definition: a null there is `KEY=.` in the source, not an
 /// absent key, and dropping it would lose the field. Everything after them is
 /// dropped when null, which is what an absent key looks like once parsed.
+///
+/// `raw` is the record's carried source text, as `(key, value)`: a key whose
+/// value still reads as that text is written with it (see [`reencoded_raw`]).
 fn build_info_string(
     batch: &RecordBatch,
     row: usize,
     field_order: &[&str],
     carried_count: usize,
     info_columns: &std::collections::HashMap<String, (usize, InfoEncoding)>,
+    raw: &[(&str, &str)],
 ) -> Result<String> {
     let mut info_parts = Vec::new();
 
@@ -1193,7 +1360,19 @@ fn build_info_string(
                 // Flag type - just include the name
                 info_parts.push(field_name.to_string());
             } else if value_str != "false" {
-                info_parts.push(format!("{field_name}={value_str}"));
+                let source = raw
+                    .iter()
+                    .find(|(key, _)| *key == field_name)
+                    .map(|&(_, source)| source)
+                    .filter(|source| {
+                        let field = batch.schema_ref().field(col_idx);
+                        !is_joined_info_text(field)
+                            && string_shape(field.data_type()).is_some_and(|list| {
+                                encoding.reencoded_raw(source, list).as_deref()
+                                    == Some(value_str.as_str())
+                            })
+                    });
+                info_parts.push(format!("{field_name}={}", source.unwrap_or(&value_str)));
             }
         }
     }
@@ -1342,6 +1521,7 @@ fn build_format_and_samples(
     sample_names: &[String],
     format_columns: Option<&std::collections::HashMap<(String, String), usize>>,
     carried_keys: Option<&str>,
+    raw: &[(usize, &str, &str)],
 ) -> Result<(String, Vec<String>)> {
     if sample_names.is_empty() || format_fields.is_empty() {
         return Ok((String::new(), Vec::new()));
@@ -1439,6 +1619,44 @@ fn build_format_and_samples(
         }
         field_values
     };
+
+    // A value that still reads as its carried source text is written with it
+    // (see `reencoded_raw`). Whether a sample's value is one string or a list
+    // is the column's: the per-sample element of the nested lists, or the flat
+    // column itself.
+    let mut field_values = field_values;
+    if !raw.is_empty() {
+        let genotypes = batch
+            .schema()
+            .index_of("genotypes")
+            .ok()
+            .and_then(|idx| batch.column(idx).as_any().downcast_ref::<StructArray>());
+        let shape = |field: &str, sample_idx: usize| -> Option<bool> {
+            if has_nested_genotypes {
+                match genotypes?.column_by_name(field)?.data_type() {
+                    DataType::List(item) | DataType::LargeList(item) => {
+                        string_shape(item.data_type())
+                    }
+                    _ => None,
+                }
+            } else {
+                let key = (sample_names.get(sample_idx)?.clone(), field.to_string());
+                let idx = *format_columns?.get(&key)?;
+                string_shape(batch.column(idx).data_type())
+            }
+        };
+        for (field, sample_vals) in selected.iter().zip(field_values.iter_mut()) {
+            for (sample_idx, value) in sample_vals.iter_mut().enumerate() {
+                if let Some(source) = format_raw_value(raw, sample_idx, field)
+                    && let Some(list) = shape(field, sample_idx)
+                    && reencoded_raw(source, list, Some(FORMAT_RESERVED)).as_deref()
+                        == Some(value.as_str())
+                {
+                    *value = source.to_string();
+                }
+            }
+        }
+    }
 
     // A carried key is kept even when every sample is missing — that is the
     // whole point, since a `.` in the source parses to the same null as an
@@ -1967,6 +2185,130 @@ mod tests {
             "VCFv4.2",
         );
         assert_eq!(joined, [format!("CSQ={csq}")]);
+    }
+
+    /// The INFO text of each record of a batch with the core columns, `columns`
+    /// as INFO, and `raw` as the carried source text, written under VCF 4.2.
+    fn info_with_raw(columns: Vec<(Field, ArrayRef)>, raw: Vec<Option<&str>>) -> Vec<String> {
+        let rows = raw.len();
+        let mut fields = create_test_schema().fields().to_vec();
+        let mut arrays: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["chr1"; rows])),
+            Arc::new(UInt32Array::from(vec![99u32; rows])),
+            Arc::new(UInt32Array::from(vec![100u32; rows])),
+            Arc::new(StringArray::from(vec![Some("rs1"); rows])),
+            Arc::new(StringArray::from(vec!["A"; rows])),
+            Arc::new(StringArray::from(vec!["G"; rows])),
+            Arc::new(Float64Array::from(vec![Some(30.0); rows])),
+            Arc::new(StringArray::from(vec![Some("PASS"); rows])),
+        ];
+        let names: Vec<String> = columns.iter().map(|(f, _)| f.name().clone()).collect();
+        for (field, array) in columns {
+            fields.push(Arc::new(field));
+            arrays.push(array);
+        }
+        fields.push(Arc::new(layout_field(
+            "_vcf_info_raw",
+            VCF_RECORD_LAYOUT_INFO_RAW,
+        )));
+        arrays.push(Arc::new(StringArray::from(raw)));
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap();
+        batch_to_vcf_lines_for_file_format(&batch, &names, &[], &[], true, "VCFv4.2")
+            .unwrap()
+            .iter()
+            .map(|line| line.line.split('\t').nth(7).unwrap().to_string())
+            .collect()
+    }
+
+    /// The source text is used for a value that still reads as it, and nothing
+    /// else: a value changed after the read is encoded, so stale text never
+    /// reaches the line (biodatageeks/vepyr#252).
+    #[test]
+    fn carried_source_text_is_written_only_for_a_value_that_still_reads_as_it() {
+        let info = info_with_raw(
+            vec![(
+                Field::new("X", DataType::Utf8, true),
+                Arc::new(StringArray::from(vec![
+                    Some("a+b"),
+                    Some("changed+b"),
+                    Some("50%"),
+                    Some("a=b"),
+                ])),
+            )],
+            vec![
+                Some("X=a%2Bb"),
+                Some("X=a%2Bb"),
+                Some("X=50%"),
+                Some("X=a=b"),
+            ],
+        );
+        assert_eq!(info, ["X=a%2Bb", "X=changed+b", "X=50%", "X=a=b"]);
+    }
+
+    /// A list is compared per element, as the reader split it on literal
+    /// commas; a `.` in the source is a missing element.
+    #[test]
+    fn carried_list_text_is_compared_per_element() {
+        let list = |items: &[Option<&str>]| -> ArrayRef {
+            let mut builder = ListBuilder::new(StringBuilder::new());
+            for item in items {
+                builder.values().append_option(*item);
+            }
+            builder.append(true);
+            Arc::new(builder.finish())
+        };
+        let field = || {
+            Field::new(
+                "L",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            )
+        };
+        let same = info_with_raw(
+            vec![(field(), list(&[Some("."), None, Some("t(12;21)")]))],
+            vec![Some("L=%2E,.,t(12%3b21)")],
+        );
+        assert_eq!(same, ["L=%2E,.,t(12%3b21)"]);
+        // One element more than the source had: not the value the text reads as.
+        let grown = info_with_raw(
+            vec![(field(), list(&[Some("a,b"), Some("c")]))],
+            vec![Some("L=a%2Cb")],
+        );
+        assert_eq!(grown, ["L=a%2Cb,c"]);
+    }
+
+    /// CSQ is written verbatim, as the engine built it; a carried entry for a
+    /// replaced input CSQ must never take its place.
+    #[test]
+    fn joined_text_ignores_a_carried_entry() {
+        let info = info_with_raw(
+            vec![(
+                with_number(Field::new("CSQ", DataType::Utf8, true), "."),
+                Arc::new(StringArray::from(vec![Some("T|intron_variant|a%3Db")])),
+            )],
+            vec![Some("CSQ=old%20csq")],
+        );
+        assert_eq!(info, ["CSQ=T|intron_variant|a%3Db"]);
+    }
+
+    /// The decode the comparison relies on is the reader's: two hex digits of
+    /// either case after `%`, anything else literal, left to right.
+    #[test]
+    fn the_source_text_is_decoded_as_the_reader_decodes_it() {
+        for (raw, decoded) in [
+            ("a%2Bb", "a+b"),
+            ("a%3bb", "a;b"),
+            ("50%", "50%"),
+            ("50%25", "50%"),
+            ("%ZZ", "%ZZ"),
+            ("%%41", "%A"),
+            ("%4", "%4"),
+            ("x%", "x%"),
+            ("%C3%A9", "\u{e9}"),
+        ] {
+            assert_eq!(percent_decoded(raw).as_deref(), Some(decoded), "{raw}");
+        }
+        assert_eq!(percent_decoded("%FF"), None);
     }
 
     /// A scalar string column declared `Number=.` already holds joined VCF

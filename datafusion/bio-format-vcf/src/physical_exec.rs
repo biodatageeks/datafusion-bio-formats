@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter, Write};
 use std::sync::Arc;
 
@@ -25,8 +25,9 @@ use datafusion_bio_format_core::record_filter::evaluate_record_filters;
 use datafusion_bio_format_core::{
     metadata::{
         VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
-        VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN,
-        VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+        VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_RECORD_LAYOUT_FORMAT_KEYS,
+        VCF_RECORD_LAYOUT_FORMAT_RAW, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_INFO_RAW,
+        VCF_RECORD_LAYOUT_KEY,
     },
     object_storage::{
         CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_storage_type,
@@ -248,6 +249,10 @@ pub(crate) struct ProjectionFlags {
     pub(crate) info_keys: bool,
     /// The carried FORMAT key list column (`_vcf_format_keys`).
     pub(crate) format_keys: bool,
+    /// The carried INFO source-text column (`_vcf_info_raw`).
+    pub(crate) info_raw: bool,
+    /// The carried sample source-text column (`_vcf_format_raw`).
+    pub(crate) format_raw: bool,
 }
 
 pub(crate) fn filters_reference_column(filters: &[Expr], name: &str) -> bool {
@@ -291,6 +296,8 @@ impl ProjectionFlags {
                 .is_none_or(|p| p.iter().any(|&i| is_format(i))),
             info_keys: layout.info_keys.is_some_and(&contains),
             format_keys: layout.format_keys.is_some_and(&contains),
+            info_raw: layout.info_raw.is_some_and(&contains),
+            format_raw: layout.format_raw.is_some_and(&contains),
         }
     }
 }
@@ -306,6 +313,8 @@ impl ProjectionFlags {
 pub(crate) struct RecordLayoutColumns {
     pub(crate) info_keys: Option<usize>,
     pub(crate) format_keys: Option<usize>,
+    pub(crate) info_raw: Option<usize>,
+    pub(crate) format_raw: Option<usize>,
 }
 
 impl RecordLayoutColumns {
@@ -321,20 +330,24 @@ impl RecordLayoutColumns {
         Self {
             info_keys: marked(VCF_RECORD_LAYOUT_INFO_KEYS),
             format_keys: marked(VCF_RECORD_LAYOUT_FORMAT_KEYS),
+            info_raw: marked(VCF_RECORD_LAYOUT_INFO_RAW),
+            format_raw: marked(VCF_RECORD_LAYOUT_FORMAT_RAW),
         }
     }
 
-    /// Reserved names the *source file* already uses for a field of its own.
+    /// Which of the reserved `names` the *source file* already uses for a field
+    /// of its own.
     ///
-    /// A VCF may declare an INFO or FORMAT field with any ID, these two names
+    /// A VCF may declare an INFO or FORMAT field with any ID, these names
     /// included. Such a column is data, and the marker metadata keeps the
     /// writer from mistaking it for plumbing — but appending a carried column
     /// beside it would put two fields with one name in the schema, which makes
     /// every by-name reference to either of them ambiguous. An unmarked field
     /// holding a reserved name is therefore a collision.
-    pub(crate) fn source_collisions(schema: &Schema) -> Vec<&'static str> {
-        [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN]
-            .into_iter()
+    pub(crate) fn source_collisions(schema: &Schema, names: &[&'static str]) -> Vec<&'static str> {
+        names
+            .iter()
+            .copied()
             .filter(|name| {
                 schema.index_of(name).is_ok_and(|idx| {
                     !schema
@@ -347,8 +360,101 @@ impl RecordLayoutColumns {
     }
 
     fn holds(&self, index: usize) -> bool {
-        self.info_keys == Some(index) || self.format_keys == Some(index)
+        [
+            self.info_keys,
+            self.format_keys,
+            self.info_raw,
+            self.format_raw,
+        ]
+        .contains(&Some(index))
     }
+}
+
+/// What decides whether a value's source text is carried in `_vcf_info_raw` /
+/// `_vcf_format_raw`: which keys hold a single String, where a literal `,` is
+/// part of the value rather than a list separator, and where each source
+/// sample lands among the samples read.
+#[derive(Debug, Default)]
+pub(crate) struct RawValueRules {
+    info_scalar_strings: HashSet<String>,
+    format_scalar_strings: HashSet<String>,
+    /// Output position of each source sample; `None` for one not read.
+    sample_positions: Vec<Option<usize>>,
+}
+
+impl RawValueRules {
+    /// The rules for `header`'s fields, reading `sample_names` out of the
+    /// file's `source_sample_names`.
+    pub(crate) fn new(
+        header: &Header,
+        sample_names: &[String],
+        source_sample_names: &[String],
+    ) -> Self {
+        let info_scalar_strings = header
+            .infos()
+            .keys()
+            .filter(|key| info_to_arrow_type(header.infos(), key) == DataType::Utf8)
+            .cloned()
+            .collect();
+        let format_scalar_strings = header
+            .formats()
+            .keys()
+            .filter(|key| format_to_arrow_type(header.formats(), key) == DataType::Utf8)
+            .cloned()
+            .collect();
+        let mut sample_positions = vec![None; source_sample_names.len()];
+        if source_sample_names.len() == 1 {
+            if !sample_names.is_empty() {
+                sample_positions[0] = Some(0);
+            }
+        } else {
+            for (position, source) in
+                resolve_selected_sample_indices(sample_names, source_sample_names)
+                    .into_iter()
+                    .enumerate()
+            {
+                sample_positions[source] = Some(position);
+            }
+        }
+        Self {
+            info_scalar_strings,
+            format_scalar_strings,
+            sample_positions,
+        }
+    }
+
+    /// Whether the writer could fail to reproduce INFO `key=value` from the
+    /// parsed value: an escape or a literal `%` (the reader decodes either), a
+    /// `=` (always escaped), a space (escaped before VCF 4.3), a control byte,
+    /// or a `,` inside a single String.
+    fn info_needs_source(&self, key: &str, value: &str) -> bool {
+        needs_source(value, true, || self.info_scalar_strings.contains(key))
+    }
+
+    /// The FORMAT counterpart: `=` and spaces are written as they are in a
+    /// sample value, so only `%`, a control byte or a `,` in a single String
+    /// count. GT is never decoded.
+    fn format_needs_source(&self, key: &str, value: &str) -> bool {
+        key != "GT" && needs_source(value, false, || self.format_scalar_strings.contains(key))
+    }
+}
+
+/// Scans `value` for a byte the writer may not reproduce: `%` and controls
+/// always, `=` and space in INFO, and `,` when `scalar_string` says the key
+/// holds a single String (asked only for a value with a comma).
+#[inline]
+fn needs_source(value: &str, info: bool, scalar_string: impl FnOnce() -> bool) -> bool {
+    let mut comma = false;
+    for &b in value.as_bytes() {
+        match b {
+            b'%' => return true,
+            b'=' | b' ' if info => return true,
+            b',' => comma = true,
+            _ if b < 0x20 || b == 0x7f => return true,
+            _ => {}
+        }
+    }
+    comma && scalar_string()
 }
 
 /// Arrow builders for the 8 core VCF columns, replacing Vec<T> accumulators
@@ -364,6 +470,9 @@ pub(crate) struct CoreBatchBuilders {
     filter: Option<StringBuilder>,
     info_keys: Option<StringBuilder>,
     format_keys: Option<StringBuilder>,
+    info_raw: Option<StringBuilder>,
+    format_raw: Option<StringBuilder>,
+    raw_rules: RawValueRules,
     /// Scratch for building a key list without allocating per record.
     keys_buf: String,
 }
@@ -421,14 +530,29 @@ impl CoreBatchBuilders {
             } else {
                 None
             },
+            // Null for almost every record, so no byte capacity up front.
+            info_raw: flags
+                .info_raw
+                .then(|| StringBuilder::with_capacity(batch_size, 0)),
+            format_raw: flags
+                .format_raw
+                .then(|| StringBuilder::with_capacity(batch_size, 0)),
+            raw_rules: RawValueRules::default(),
             // A read that carries no layout allocates nothing here; the
             // capacity hint only pays off when the buffer is actually used.
-            keys_buf: if flags.info_keys || flags.format_keys {
+            keys_buf: if flags.info_keys || flags.format_keys || flags.info_raw || flags.format_raw
+            {
                 String::with_capacity(64)
             } else {
                 String::new()
             },
         }
+    }
+
+    /// Sets what decides which values' source text is carried. A read that
+    /// carries none ignores it.
+    pub(crate) fn set_raw_value_rules(&mut self, rules: RawValueRules) {
+        self.raw_rules = rules;
     }
 
     #[inline]
@@ -536,11 +660,59 @@ impl CoreBatchBuilders {
             }
             b.append_value(&self.keys_buf);
         }
+        // The source text of the values the writer may not reproduce. The split
+        // is the reader's: `;` between INFO fields and the first `=` after the
+        // key, `:` between sample values in FORMAT key order.
+        if let Some(b) = &mut self.info_raw {
+            self.keys_buf.clear();
+            let info = record.info();
+            let raw = info.as_ref();
+            if raw != "." {
+                for entry in raw.split(';') {
+                    if let Some((key, value)) = entry.split_once('=')
+                        && self.raw_rules.info_needs_source(key, value)
+                    {
+                        if !self.keys_buf.is_empty() {
+                            self.keys_buf.push(';');
+                        }
+                        self.keys_buf.push_str(entry);
+                    }
+                }
+            }
+            if self.keys_buf.is_empty() {
+                b.append_null();
+            } else {
+                b.append_value(&self.keys_buf);
+            }
+        }
+        if let Some(b) = &mut self.format_raw {
+            self.keys_buf.clear();
+            let samples = record.samples();
+            let keys = samples.keys();
+            for (source, sample) in samples.iter().enumerate() {
+                let Some(Some(position)) = self.raw_rules.sample_positions.get(source) else {
+                    continue;
+                };
+                for (key, value) in keys.iter().zip(sample.as_ref().split(':')) {
+                    if self.raw_rules.format_needs_source(key, value) {
+                        if !self.keys_buf.is_empty() {
+                            self.keys_buf.push('\t');
+                        }
+                        let _ = write!(self.keys_buf, "{position}:{key}:{value}");
+                    }
+                }
+            }
+            if self.keys_buf.is_empty() {
+                b.append_null();
+            } else {
+                b.append_value(&self.keys_buf);
+            }
+        }
     }
 
-    /// Finishes all active builders: the 8 core arrays, then the two carried
+    /// Finishes all active builders: the 8 core arrays, then the four carried
     /// record-layout arrays.
-    pub(crate) fn finish(&mut self) -> [Option<Arc<dyn Array>>; 10] {
+    pub(crate) fn finish(&mut self) -> [Option<Arc<dyn Array>>; 12] {
         [
             self.chrom
                 .as_mut()
@@ -572,6 +744,12 @@ impl CoreBatchBuilders {
             self.format_keys
                 .as_mut()
                 .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.info_raw
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.format_raw
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
         ]
     }
 }
@@ -583,7 +761,7 @@ impl CoreBatchBuilders {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_record_batch_from_builders(
     schema: SchemaRef,
-    core_arrays: [Option<Arc<dyn Array>>; 10],
+    core_arrays: [Option<Arc<dyn Array>>; 12],
     infos: Option<&Vec<Arc<dyn Array>>>,
     formats: Option<&Vec<Arc<dyn Array>>>,
     num_info_fields: usize,
@@ -599,6 +777,10 @@ pub(crate) fn build_record_batch_from_builders(
             Some(8)
         } else if layout.format_keys == Some(i) {
             Some(9)
+        } else if layout.info_raw == Some(i) {
+            Some(10)
+        } else if layout.format_raw == Some(i) {
+            Some(11)
         } else {
             None
         }
@@ -915,6 +1097,13 @@ async fn get_local_vcf(
     let has_format_fields = format_mode.has_fields();
 
     let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
+    if flags.info_raw || flags.format_raw {
+        builders.set_raw_value_rules(RawValueRules::new(
+            &header,
+            &sample_names,
+            &source_sample_names,
+        ));
+    }
 
     let has_residual_filters = !residual_filters.is_empty();
     let needs_id_for_filters = filters_reference_column(&residual_filters, "id");
@@ -1153,6 +1342,13 @@ async fn get_local_vcf_sync(
         let has_format_fields = format_mode.has_fields();
 
         let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
+        if flags.info_raw || flags.format_raw {
+            builders.set_raw_value_rules(RawValueRules::new(
+                &header,
+                &sample_names,
+                &source_sample_names,
+            ));
+        }
         let mut join_buf = String::with_capacity(64);
 
         let has_residual_filters = !residual_filters.is_empty();
@@ -1454,6 +1650,13 @@ async fn get_remote_vcf_stream(
 
     let stream = try_stream! {
         let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
+        if flags.info_raw || flags.format_raw {
+            builders.set_raw_value_rules(RawValueRules::new(
+                &header,
+                &sample_names,
+                &source_sample_names,
+            ));
+        }
         let mut join_buf = String::with_capacity(64);
 
         debug!("Info fields: {:?}", info_builders);
@@ -3012,6 +3215,13 @@ async fn get_indexed_vcf_stream(
         let has_format_fields = format_mode.has_fields();
 
         let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
+        if flags.info_raw || flags.format_raw {
+            builders.set_raw_value_rules(RawValueRules::new(
+                &header,
+                &sample_names,
+                &source_sample_names,
+            ));
+        }
         let mut join_buf = String::with_capacity(64);
         let has_residual_filters = !residual_filters.is_empty();
         let needs_id_for_filters = filters_reference_column(&residual_filters, "id");

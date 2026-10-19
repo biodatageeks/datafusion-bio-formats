@@ -1,0 +1,16 @@
+##fileformat=VCFv4.2
+##INFO=<ID=X,Number=1,Type=String,Description="Scalar string">
+##INFO=<ID=L,Number=.,Type=String,Description="List of strings">
+##INFO=<ID=P,Number=1,Type=String,Description="Percent and spaces">
+##INFO=<ID=CLNVI,Number=.,Type=String,Description="Variant identifiers">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Depth">
+##INFO=<ID=AD,Number=.,Type=Integer,Description="Allele depths">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=FS,Number=1,Type=String,Description="Sample string">
+##FORMAT=<ID=FL,Number=.,Type=String,Description="Sample string list">
+##contig=<ID=chr1,length=1000>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1
+chr1	100	rs1	A	T	60	PASS	X=a%2Bb;L=t(12%3b21),c;P=50%;CLNVI=Breast_Cancer_Information_Core_(BIC)_(BRCA1):5271%2B80&base_change%3Ddel%20T|Breast_Cancer_Information_Core_(BIC)_(BRCA1):5271+80&base_change%3Ddel_T|ClinGen:CA290825713;DP=5;AD=1,2	GT:FS:FL	0/1:p%3Bq:a%2Cb,c
+chr1	200	rs2	G	C	60	PASS	X=a=b;L=%2E,.,x;P=a b;CLNVI=x,y;DP=7;AD=3,4	GT:FS:FL	1/1:x%3Ay:.
+chr1	300	rs3	T	G	60	PASS	X=plain;L=a,b;P=x;DP=9;AD=5,6	GT:FS:FL	0/1:s:t
+chr1	400	rs4	C	A	60	PASS	X=a,b%3Bc;DP=1	GT:FS:FL	0/1:m,n:.
