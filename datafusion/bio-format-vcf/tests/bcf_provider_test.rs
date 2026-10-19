@@ -2576,6 +2576,44 @@ async fn bcf_rejects_wrong_fixed_info_cardinality_when_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_materializes_scalar_character_info() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.5\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##INFO=<ID=CH,Number=1,Type=Character,Description=\"Character value\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\tCH=%3B\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "character-info", body)?;
+
+    let provider = VcfTableProvider::new(
+        bcf_path,
+        Some(vec!["CH".to_string()]),
+        Some(Vec::new()),
+        None,
+        true,
+    )?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT \"CH\" FROM variants")
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    assert_eq!(batch.num_rows(), 1);
+    let value = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("Character INFO scalar should use Arrow UTF-8");
+    assert_eq!(value.value(0), ";");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_multicharacter_info_values_when_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
