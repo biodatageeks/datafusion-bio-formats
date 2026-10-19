@@ -1251,3 +1251,71 @@ async fn transcript_schema_has_gene_hgnc_id_native() -> datafusion::common::Resu
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// #214: CDS bounds on RefSeq transcripts with cDNA indel `_rna_edit`s.
+//
+// Fixture `transcript_refseq_edit_bounds_116` holds only the named transcripts,
+// copied with Perl `nstore` out of the raw VEP 116 merged cache region files.
+// Expected values are Ensembl's `Transcript::coding_region_start/end`
+// (Transcript.pm:1087-1154) evaluated in Perl on those same objects, not the
+// reader's output.
+// ---------------------------------------------------------------------------
+
+const REFSEQ_EDIT_BOUNDS_FIXTURE: &str = "transcript_refseq_edit_bounds_116";
+
+#[tokio::test]
+async fn real_refseq_edit_bounds_match_ensembl() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(
+        EnsemblCacheOptions::new(fixture_path(REFSEQ_EDIT_BOUNDS_FIXTURE))
+            .with_cache_source_type(CacheSourceType::Merged),
+    )?;
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+    let batches = ctx
+        .sql("SELECT stable_id, cds_start, cds_end FROM tx ORDER BY stable_id")
+        .await?
+        .collect()
+        .await?;
+
+    let mut got = Vec::new();
+    for batch in &batches {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let starts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let ends = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            got.push((
+                ids.value(i).to_string(),
+                (!starts.is_null(i)).then(|| starts.value(i)),
+                (!ends.is_null(i)).then(|| ends.value(i)),
+            ));
+        }
+    }
+
+    let expected = [
+        ("NM_001304718.2", 87_952_217, 87_965_472), // PTEN, 1-bp 5'-UTR deletion edit
+        ("NM_001405666.3", 16_563_943, 16_592_021), // NBPF1, already right: control
+        ("NM_001405667.2", 16_563_943, 16_592_021), // NBPF1, start was 1002 bp upstream
+        ("NM_002111.8", 3_074_826, 3_240_059),      // HTT, end was +6
+        ("NM_002537.3", 64_688_704, 64_703_048),    // OAZ2, minus strand, BAM failed
+        ("NM_015120.4", 73_385_869, 73_609_612),    // ALMS1, end was +3
+    ];
+    let expected: Vec<(String, Option<i64>, Option<i64>)> = expected
+        .iter()
+        .map(|&(id, s, e)| (id.to_string(), Some(s), Some(e)))
+        .collect();
+    assert_eq!(got, expected);
+    Ok(())
+}

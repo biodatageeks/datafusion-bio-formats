@@ -39,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ensembl cache transcripts take `cds_start`/`cds_end` from the translation
+  (`start`/`end` on the unedited `start_exon`/`end_exon`), as Ensembl's
+  `Transcript::coding_region_start/end` does, instead of mapping
+  `cdna_coding_start/end` through the raw exons. RefSeq transcripts with a cDNA
+  indel `_rna_edit` upstream of a bound no longer get that bound shifted by the
+  edit length (614 transcripts in the VEP 116 merged cache, e.g. PTEN
+  NM_001304718.2, HTT NM_002111.8, ALMS1 NM_015120.4). The translation-derived
+  bound is no longer dropped when it lies outside the transcript span, since
+  Ensembl applies no such check (biodatageeks/vepyr#214).
 - PGEN companion limit errors name the option to raise
   (`max_companion_bytes`, `max_decompressed_companion_bytes`) and its
   configured value, as `max_variants` and `max_samples` already did
