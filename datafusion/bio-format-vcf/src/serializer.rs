@@ -3,6 +3,7 @@
 //! This module provides functionality for converting DataFusion Arrow data back
 //! to VCF format for writing to files.
 
+use crate::header_builder::DEFAULT_VCF_FILE_FORMAT;
 use datafusion::arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
     ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
@@ -24,8 +25,30 @@ const DOSAGE_MODE: &str = "dosage";
 /// elements and `%` starts an escape.
 const INFO_RESERVED: &[u8; 4] = b";=%,";
 
+/// [`INFO_RESERVED`] and the space, for a file that declares a version before
+/// VCF 4.3. VCF 4.1 and 4.2 allow no whitespace in an INFO value, so a space the
+/// reader decoded from `%20` (ClinVar `CLNVI=...base_change%3Dins%20A`) has to
+/// go back as `%20`. VCF 4.3 allows spaces in INFO values, and there they stay
+/// literal. Tabs and line breaks are controls, which every version escapes.
+const INFO_RESERVED_BEFORE_4_3: &[u8; 5] = b";=%, ";
+
 /// The FORMAT counterpart, where `:` separates a sample's sub-fields.
 const FORMAT_RESERVED: &[u8; 3] = b":%,";
+
+/// Whether an INFO value written under `file_format` (a `##fileformat` value
+/// such as `VCFv4.1`) may not hold a space, which is every version before 4.3.
+/// A value that is not `VCFv<major>.<minor>` follows 4.3, the version the header
+/// writer declares by default.
+fn info_forbids_space(file_format: &str) -> bool {
+    let Some(version) = file_format.strip_prefix("VCFv") else {
+        return false;
+    };
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) < (4, 3),
+        _ => false,
+    }
+}
 
 /// Whether `b` is one of `reserved` or an ASCII control. Every byte of a
 /// multi-byte UTF-8 character is >= 0x80, so it never matches.
@@ -110,6 +133,29 @@ fn column_needs_escape<const N: usize>(array: &dyn Array, reserved: &[u8; N]) ->
         column_needs_escape(a.values().as_ref(), reserved)
     } else {
         false
+    }
+}
+
+/// How the string values of one INFO column are written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfoEncoding {
+    /// As they are: joined text, or no character to escape in this batch.
+    Verbatim,
+    /// With [`INFO_RESERVED`] encoded.
+    Reserved,
+    /// With [`INFO_RESERVED_BEFORE_4_3`] encoded.
+    ReservedAndSpace,
+}
+
+impl InfoEncoding {
+    fn value_string(self, array: &dyn Array, row: usize) -> Result<Option<String>> {
+        match self {
+            Self::Verbatim => extract_info_value_string(array, row, None::<&[u8; 0]>),
+            Self::Reserved => extract_info_value_string(array, row, Some(INFO_RESERVED)),
+            Self::ReservedAndSpace => {
+                extract_info_value_string(array, row, Some(INFO_RESERVED_BEFORE_4_3))
+            }
+        }
     }
 }
 
@@ -713,6 +759,32 @@ pub fn batch_to_vcf_lines(
     sample_names: &[String],
     coordinate_system_zero_based: bool,
 ) -> Result<Vec<VcfRecordLine>> {
+    batch_to_vcf_lines_for_file_format(
+        batch,
+        info_fields,
+        format_fields,
+        sample_names,
+        coordinate_system_zero_based,
+        DEFAULT_VCF_FILE_FORMAT,
+    )
+}
+
+/// [`batch_to_vcf_lines`] for lines written under the `##fileformat` version
+/// `file_format`, as [`header_file_format`] gives it for the header's schema.
+///
+/// The version decides which characters an INFO value has to escape: before
+/// VCF 4.3 a space is one of them (see [`INFO_RESERVED_BEFORE_4_3`]).
+/// [`batch_to_vcf_lines`] writes under [`DEFAULT_VCF_FILE_FORMAT`].
+///
+/// [`header_file_format`]: crate::header_builder::header_file_format
+pub fn batch_to_vcf_lines_for_file_format(
+    batch: &RecordBatch,
+    info_fields: &[String],
+    format_fields: &[String],
+    sample_names: &[String],
+    coordinate_system_zero_based: bool,
+    file_format: &str,
+) -> Result<Vec<VcfRecordLine>> {
     validate_vcf_serializable_genotypes(&batch.schema())?;
 
     let num_rows = batch.num_rows();
@@ -742,7 +814,7 @@ pub fn batch_to_vcf_lines(
     let filters = get_string_column_by_name(batch, "filter")?;
 
     // Build column index maps for INFO and FORMAT fields
-    let info_columns = build_info_column_map(batch, info_fields);
+    let info_columns = build_info_column_map(batch, info_fields, info_forbids_space(file_format));
     let num_samples = sample_names.len();
 
     // Pre-resolve genotype columns for batch-level type resolution (multisample fast path)
@@ -992,21 +1064,35 @@ fn get_optional_f64_column_by_name<'a>(
         .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be Float64 type")))
 }
 
-/// Maps each INFO field to its column index and whether its string values are
-/// percent-encoded: not for a column of joined text (see
-/// [`is_joined_info_text`]), nor for one with no reserved character anywhere in
-/// this batch (see [`column_needs_escape`]).
+/// Maps each INFO field to its column index and how its string values are
+/// written: verbatim for a column of joined text (see [`is_joined_info_text`])
+/// or one with nothing to escape anywhere in this batch (see
+/// [`column_needs_escape`]), otherwise percent-encoded, with the space among
+/// the escaped characters when `space_reserved`.
 fn build_info_column_map(
     batch: &RecordBatch,
     info_fields: &[String],
-) -> std::collections::HashMap<String, (usize, bool)> {
+    space_reserved: bool,
+) -> std::collections::HashMap<String, (usize, InfoEncoding)> {
     let schema = batch.schema();
     let mut map = std::collections::HashMap::new();
     for field_name in info_fields {
         if let Ok(idx) = schema.index_of(field_name) {
-            let encode = !is_joined_info_text(schema.field(idx))
-                && column_needs_escape(batch.column(idx).as_ref(), INFO_RESERVED);
-            map.insert(field_name.clone(), (idx, encode));
+            let column = batch.column(idx).as_ref();
+            let encoding = if is_joined_info_text(schema.field(idx)) {
+                InfoEncoding::Verbatim
+            } else if space_reserved {
+                if column_needs_escape(column, INFO_RESERVED_BEFORE_4_3) {
+                    InfoEncoding::ReservedAndSpace
+                } else {
+                    InfoEncoding::Verbatim
+                }
+            } else if column_needs_escape(column, INFO_RESERVED) {
+                InfoEncoding::Reserved
+            } else {
+                InfoEncoding::Verbatim
+            };
+            map.insert(field_name.clone(), (idx, encoding));
         }
     }
     map
@@ -1078,13 +1164,13 @@ fn build_info_string(
     row: usize,
     field_order: &[&str],
     carried_count: usize,
-    info_columns: &std::collections::HashMap<String, (usize, bool)>,
+    info_columns: &std::collections::HashMap<String, (usize, InfoEncoding)>,
 ) -> Result<String> {
     let mut info_parts = Vec::new();
 
     for (position, field_name) in field_order.iter().enumerate() {
         let field_name = *field_name;
-        let (col_idx, encode) = match info_columns.get(field_name) {
+        let (col_idx, encoding) = match info_columns.get(field_name) {
             Some(&entry) => entry,
             None => continue, // Column not in batch, skip
         };
@@ -1102,7 +1188,7 @@ fn build_info_string(
             continue;
         }
 
-        if let Some(value_str) = extract_info_value_string(column.as_ref(), row, encode)? {
+        if let Some(value_str) = encoding.value_string(column.as_ref(), row)? {
             if value_str == "true" {
                 // Flag type - just include the name
                 info_parts.push(field_name.to_string());
@@ -1122,16 +1208,15 @@ fn build_info_string(
 /// Extracts an INFO value as a string from an Arrow array at a specific row
 /// Supports both standard Arrow types and Polars "Large" variants (LargeUtf8, LargeList)
 ///
-/// String values are percent-encoded when `encode` is set.
-fn extract_info_value_string(
+/// String values are percent-encoded with the `reserved` set, when given.
+fn extract_info_value_string<const N: usize>(
     array: &dyn Array,
     row: usize,
-    encode: bool,
+    reserved: Option<&[u8; N]>,
 ) -> Result<Option<String>> {
     if array.is_null(row) {
         return Ok(None);
     }
-    let reserved = encode.then_some(INFO_RESERVED);
     let text = |s: &str| string_value(s, reserved);
 
     if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
@@ -1657,6 +1742,11 @@ mod tests {
     /// The INFO text of each record of a batch with the core columns and one
     /// extra INFO column.
     fn info_with_column(field: Field, column: ArrayRef) -> Vec<String> {
+        info_with_column_for(field, column, DEFAULT_VCF_FILE_FORMAT)
+    }
+
+    /// [`info_with_column`], written under the `##fileformat` `file_format`.
+    fn info_with_column_for(field: Field, column: ArrayRef, file_format: &str) -> Vec<String> {
         let rows = column.len();
         let mut fields = create_test_schema().fields().to_vec();
         let name = field.name().clone();
@@ -1676,7 +1766,7 @@ mod tests {
             ],
         )
         .unwrap();
-        batch_to_vcf_lines(&batch, &[name], &[], &[], true)
+        batch_to_vcf_lines_for_file_format(&batch, &[name], &[], &[], true, file_format)
             .unwrap()
             .iter()
             .map(|line| line.line.split('\t').nth(7).unwrap().to_string())
@@ -1789,6 +1879,94 @@ mod tests {
         ));
         assert!(needs_escape(b"a:b", FORMAT_RESERVED));
         assert!(!needs_escape(b"a;b=c", FORMAT_RESERVED));
+        for len in [1, 31, 32, 33, 64, 70] {
+            for offset in 0..len {
+                let mut bytes = vec![b'a'; len];
+                bytes[offset] = b' ';
+                assert!(!needs_escape(&bytes, INFO_RESERVED));
+                assert!(
+                    needs_escape(&bytes, INFO_RESERVED_BEFORE_4_3),
+                    "space at {offset} of {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_versions_before_4_3_forbid_a_space_in_info() {
+        for file_format in ["VCFv4.0", "VCFv4.1", "VCFv4.2", "VCFv3.3"] {
+            assert!(info_forbids_space(file_format), "{file_format}");
+        }
+        for file_format in [
+            "VCFv4.3", "VCFv4.4", "VCFv4.5", "VCFv5.0", "VCFv4", "4.1", "",
+        ] {
+            assert!(!info_forbids_space(file_format), "{file_format}");
+        }
+    }
+
+    /// VCF 4.1 and 4.2 allow no whitespace in an INFO value, so a space the
+    /// reader decoded from `%20` is encoded again under those headers. From 4.3,
+    /// which allows spaces, and by default it stays literal.
+    #[test]
+    fn a_space_in_info_is_encoded_only_before_vcf_4_3() {
+        let column = || -> ArrayRef {
+            Arc::new(StringArray::from(vec![
+                Some("base_change=ins A"),
+                Some("ins A"),
+                Some("plain"),
+            ]))
+        };
+        let field = || Field::new("CLNVI", DataType::Utf8, true);
+        for file_format in ["VCFv4.1", "VCFv4.2"] {
+            assert_eq!(
+                info_with_column_for(field(), column(), file_format),
+                [
+                    "CLNVI=base_change%3Dins%20A",
+                    "CLNVI=ins%20A",
+                    "CLNVI=plain"
+                ],
+                "{file_format}"
+            );
+        }
+        for file_format in ["VCFv4.3", "VCFv4.5"] {
+            assert_eq!(
+                info_with_column_for(field(), column(), file_format),
+                ["CLNVI=base_change%3Dins A", "CLNVI=ins A", "CLNVI=plain"],
+                "{file_format}"
+            );
+        }
+        assert_eq!(
+            info_with_column(field(), column()),
+            ["CLNVI=base_change%3Dins A", "CLNVI=ins A", "CLNVI=plain"]
+        );
+    }
+
+    /// The space rule is per element of a list, like the other escapes, and
+    /// never reaches a column of joined text such as CSQ.
+    #[test]
+    fn a_space_before_vcf_4_3_is_encoded_per_list_element_but_not_in_joined_text() {
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        builder.values().append_value("a b");
+        builder.values().append_value("c");
+        builder.append(true);
+        let list = info_with_column_for(
+            Field::new(
+                "L",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Arc::new(builder.finish()),
+            "VCFv4.2",
+        );
+        assert_eq!(list, ["L=a%20b,c"]);
+
+        let csq = "T|intron_variant|a b";
+        let joined = info_with_column_for(
+            with_number(Field::new("CSQ", DataType::Utf8, true), "."),
+            Arc::new(StringArray::from(vec![Some(csq)])),
+            "VCFv4.2",
+        );
+        assert_eq!(joined, [format!("CSQ={csq}")]);
     }
 
     /// A scalar string column declared `Number=.` already holds joined VCF

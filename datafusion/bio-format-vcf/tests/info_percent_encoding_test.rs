@@ -9,6 +9,9 @@
 //!
 //! Characters that are not reserved stay literal on both sides: a `:` inside an
 //! INFO value (ClinVar `CLNDISDB=MedGen:C1`) and any non-ASCII byte.
+//!
+//! Before VCF 4.3 an INFO value may not hold a space either, so under a header
+//! declaring 4.1 or 4.2 a space is escaped too (`%20`).
 
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
@@ -172,5 +175,38 @@ async fn the_reader_still_hands_out_decoded_values() {
 async fn a_literal_semicolon_in_a_sample_value_stays_literal() {
     let input = literal_format_semicolon_vcf();
     let written = round_trip("format_semicolon", &input).await;
+    assert_eq!(body(&written), body(&input));
+}
+
+/// One record with `info` under a header declaring `file_format`.
+fn space_vcf(file_format: &str, info: &str) -> String {
+    format!(
+        "##fileformat={file_format}\n\
+         ##INFO=<ID=CLNVI,Number=.,Type=String,Description=\"Variant identifiers\">\n\
+         ##contig=<ID=chr13,length=114364328>\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+         chr13\t32333365\t51220\tT\tTA\t.\t.\t{info}\n"
+    )
+}
+
+/// VCF 4.1 and 4.2 allow no whitespace in INFO, so ClinVar (`VCFv4.1`)
+/// escapes a space as `%20`, and the writer has to as well: written as a plain
+/// space it breaks the version the header declares.
+#[tokio::test]
+async fn an_escaped_space_round_trips_under_a_header_before_vcf_4_3() {
+    let info = "CLNVI=Breast_Cancer_Information_Core_(BIC)_(BRCA2):2116&base_change%3Dins%20A|ClinGen:CA013728";
+    for file_format in ["VCFv4.1", "VCFv4.2"] {
+        let input = space_vcf(file_format, info);
+        let written = round_trip("space_before_4_3", &input).await;
+        assert!(written.starts_with(&format!("##fileformat={file_format}\n")));
+        assert_eq!(body(&written), body(&input), "{file_format}");
+    }
+}
+
+/// VCF 4.3 allows spaces in INFO values, so a literal one stays literal.
+#[tokio::test]
+async fn a_literal_space_stays_literal_from_vcf_4_3() {
+    let input = space_vcf("VCFv4.3", "CLNVI=base_change%3Dins A");
+    let written = round_trip("space_4_3", &input).await;
     assert_eq!(body(&written), body(&input));
 }

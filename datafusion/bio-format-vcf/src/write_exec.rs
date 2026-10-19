@@ -3,7 +3,8 @@
 //! This module provides the physical execution plan for writing DataFusion
 //! query results to VCF files.
 
-use crate::serializer::{batch_to_vcf_lines, validate_vcf_serializable_genotypes};
+use crate::header_builder::header_file_format;
+use crate::serializer::{batch_to_vcf_lines_for_file_format, validate_vcf_serializable_genotypes};
 use crate::writer::{VcfCompressionType, VcfLocalWriter};
 use datafusion::arrow::array::{
     Array, LargeListArray, ListArray, RecordBatch, StructArray, UInt64Array,
@@ -320,6 +321,9 @@ async fn write_vcf_stream(
     let header_schema = merge_metadata_into_schema(&input_schema, &source_metadata);
     validate_vcf_serializable_genotypes(&input_schema)?;
     validate_vcf_serializable_genotypes(&header_schema)?;
+    // The records are written under the header's version, which decides what
+    // an INFO value has to escape.
+    let file_format = header_file_format(&header_schema);
 
     // Do not create or truncate the destination until the input representation
     // is known to be losslessly serializable.
@@ -336,12 +340,13 @@ async fn write_vcf_stream(
             writer.write_header(&header_schema, &info_fields, &format_fields, &sample_names)?;
 
             if first_batch.num_rows() > 0 {
-                let records = batch_to_vcf_lines(
+                let records = batch_to_vcf_lines_for_file_format(
                     &first_batch,
                     &info_fields,
                     &format_fields,
                     &sample_names,
                     coordinate_system_zero_based,
+                    &file_format,
                 )?;
                 total_count += records.len() as u64;
                 writer.write_records(&records)?;
@@ -363,12 +368,13 @@ async fn write_vcf_stream(
             continue;
         }
 
-        let records = batch_to_vcf_lines(
+        let records = batch_to_vcf_lines_for_file_format(
             &batch,
             &info_fields,
             &format_fields,
             &sample_names,
             coordinate_system_zero_based,
+            &file_format,
         )?;
 
         total_count += records.len() as u64;
