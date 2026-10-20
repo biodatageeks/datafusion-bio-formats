@@ -3,6 +3,7 @@
 //! This module provides functionality for converting DataFusion Arrow data back
 //! to VCF format for writing to files.
 
+use crate::header_builder::DEFAULT_VCF_FILE_FORMAT;
 use datafusion::arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
     ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
@@ -12,12 +13,168 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::{
     GENOTYPE_OUTPUT_MODE_KEY,
     metadata::{
-        VCF_FIELD_FORMAT_ID_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_RECORD_LAYOUT_FORMAT_KEYS,
-        VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+        VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY,
+        VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
     },
 };
 
 const DOSAGE_MODE: &str = "dosage";
+
+/// What an INFO value escapes (VCF 4.3 §1.2), besides the ASCII controls: `;`
+/// ends the field, `=` separates a key from its value, `,` separates list
+/// elements and `%` starts an escape.
+const INFO_RESERVED: &[u8; 4] = b";=%,";
+
+/// [`INFO_RESERVED`] and the space, for a file that declares a version before
+/// VCF 4.3. VCF 4.1 and 4.2 allow no whitespace in an INFO value, so a space the
+/// reader decoded from `%20` (ClinVar `CLNVI=...base_change%3Dins%20A`) has to
+/// go back as `%20`. VCF 4.3 allows spaces in INFO values, and there they stay
+/// literal. Tabs and line breaks are controls, which every version escapes.
+const INFO_RESERVED_BEFORE_4_3: &[u8; 5] = b";=%, ";
+
+/// The FORMAT counterpart, where `:` separates a sample's sub-fields.
+const FORMAT_RESERVED: &[u8; 3] = b":%,";
+
+/// Whether an INFO value written under `file_format` (a `##fileformat` value
+/// such as `VCFv4.1`) may not hold a space, which is every version before 4.3.
+/// A value that is not `VCFv<major>.<minor>` follows 4.3, the version the header
+/// writer declares by default.
+fn info_forbids_space(file_format: &str) -> bool {
+    let Some(version) = file_format.strip_prefix("VCFv") else {
+        return false;
+    };
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) < (4, 3),
+        _ => false,
+    }
+}
+
+/// Whether `b` is one of `reserved` or an ASCII control. Every byte of a
+/// multi-byte UTF-8 character is >= 0x80, so it never matches.
+#[inline(always)]
+fn is_escaped<const N: usize>(b: u8, reserved: &[u8; N]) -> bool {
+    (b < 0x20) | (b == 0x7f) | reserved.iter().fold(false, |hit, &r| hit | (b == r))
+}
+
+/// Whether any byte of `bytes` needs an escape. The comparisons are folded
+/// without a branch over 32-byte chunks so that the compiler vectorizes them:
+/// this runs over every string the writer emits, and a byte-at-a-time scan
+/// costs more than the copy it guards.
+fn needs_escape<const N: usize>(bytes: &[u8], reserved: &[u8; N]) -> bool {
+    let mut chunks = bytes.chunks_exact(32);
+    chunks.any(|chunk| {
+        chunk
+            .iter()
+            .fold(false, |hit, &b| hit | is_escaped(b, reserved))
+    }) || chunks.remainder().iter().any(|&b| is_escaped(b, reserved))
+}
+
+/// Appends `value` to `buf`, percent-encoding the `reserved` characters and the
+/// ASCII controls with upper-case hex.
+///
+/// The reader decodes these escapes, so a value written back raw would end the
+/// INFO field early or add a list element (biodatageeks/vepyr#207). Anything
+/// non-ASCII is written as is: encoding it too, as `utf8_percent_encode` does,
+/// would rewrite every UTF-8 value that was never escaped in the input.
+fn push_percent_encoded<const N: usize>(buf: &mut String, value: &str, reserved: &[u8; N]) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    if !needs_escape(value.as_bytes(), reserved) {
+        buf.push_str(value);
+        return;
+    }
+    for c in value.chars() {
+        if c.is_ascii() && is_escaped(c as u8, reserved) {
+            let b = c as u8;
+            buf.push('%');
+            buf.push(HEX[usize::from(b >> 4)] as char);
+            buf.push(HEX[usize::from(b & 0x0f)] as char);
+        } else {
+            buf.push(c);
+        }
+    }
+}
+
+fn percent_encoded<const N: usize>(value: &str, reserved: &[u8; N]) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    push_percent_encoded(&mut encoded, value, reserved);
+    encoded
+}
+
+/// `value` percent-encoded with `reserved`, or copied as is without one.
+fn string_value<const N: usize>(value: &str, reserved: Option<&[u8; N]>) -> String {
+    match reserved {
+        Some(reserved) => percent_encoded(value, reserved),
+        None => value.to_string(),
+    }
+}
+
+/// Whether any string in `array`, or in its list elements, needs an escape.
+///
+/// It scans the column's value bytes once per batch, so a column without a
+/// reserved character, the usual case, is written with no per-value scan. The
+/// values are short (16 bytes on average in the GIAB HG002 INFO lists), so a
+/// scan per value costs more than one over the whole buffer. The value buffer
+/// of a sliced array also holds bytes outside the slice, which can only turn a
+/// clean column into one that is scanned per value.
+fn column_needs_escape<const N: usize>(array: &dyn Array, reserved: &[u8; N]) -> bool {
+    let any = array.as_any();
+    if let Some(a) = any.downcast_ref::<StringArray>() {
+        needs_escape(a.value_data(), reserved)
+    } else if let Some(a) = any.downcast_ref::<LargeStringArray>() {
+        needs_escape(a.value_data(), reserved)
+    } else if let Some(a) = any.downcast_ref::<StringViewArray>() {
+        a.iter()
+            .flatten()
+            .any(|s| needs_escape(s.as_bytes(), reserved))
+    } else if let Some(a) = any.downcast_ref::<ListArray>() {
+        column_needs_escape(a.values().as_ref(), reserved)
+    } else if let Some(a) = any.downcast_ref::<LargeListArray>() {
+        column_needs_escape(a.values().as_ref(), reserved)
+    } else {
+        false
+    }
+}
+
+/// How the string values of one INFO column are written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfoEncoding {
+    /// As they are: joined text, or no character to escape in this batch.
+    Verbatim,
+    /// With [`INFO_RESERVED`] encoded.
+    Reserved,
+    /// With [`INFO_RESERVED_BEFORE_4_3`] encoded.
+    ReservedAndSpace,
+}
+
+impl InfoEncoding {
+    fn value_string(self, array: &dyn Array, row: usize) -> Result<Option<String>> {
+        match self {
+            Self::Verbatim => extract_info_value_string(array, row, None::<&[u8; 0]>),
+            Self::Reserved => extract_info_value_string(array, row, Some(INFO_RESERVED)),
+            Self::ReservedAndSpace => {
+                extract_info_value_string(array, row, Some(INFO_RESERVED_BEFORE_4_3))
+            }
+        }
+    }
+}
+
+/// Whether an INFO column already holds joined VCF text to be written verbatim.
+///
+/// A scalar string column declared `Number=.` is one: the annotation engine's
+/// CSQ, escaped by the VEP rules, with `,` between its blocks. The reader never
+/// produces that shape, since it reads a `Number=.` field as a list, so no input
+/// value can bypass the encoding this way. Only `.` qualifies: a scalar column
+/// declared `A`, `R` or `G` is still encoded.
+fn is_joined_info_text(field: &Field) -> bool {
+    matches!(
+        field.data_type(),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    ) && field
+        .metadata()
+        .get(VCF_FIELD_NUMBER_KEY)
+        .is_some_and(|number| number == ".")
+}
 
 fn field_is_gt(field: &Field) -> bool {
     field.name() == "GT"
@@ -347,7 +504,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    buf.push_str(s);
+                    push_percent_encoded(buf, s, FORMAT_RESERVED);
                 }
             }
         }
@@ -359,7 +516,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    buf.push_str(s);
+                    push_percent_encoded(buf, s, FORMAT_RESERVED);
                 }
             }
         }
@@ -371,7 +528,7 @@ fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) ->
                 if s.is_empty() {
                     buf.push('.');
                 } else {
-                    buf.push_str(s);
+                    push_percent_encoded(buf, s, FORMAT_RESERVED);
                 }
             }
         }
@@ -602,6 +759,32 @@ pub fn batch_to_vcf_lines(
     sample_names: &[String],
     coordinate_system_zero_based: bool,
 ) -> Result<Vec<VcfRecordLine>> {
+    batch_to_vcf_lines_for_file_format(
+        batch,
+        info_fields,
+        format_fields,
+        sample_names,
+        coordinate_system_zero_based,
+        DEFAULT_VCF_FILE_FORMAT,
+    )
+}
+
+/// [`batch_to_vcf_lines`] for lines written under the `##fileformat` version
+/// `file_format`, as [`header_file_format`] gives it for the header's schema.
+///
+/// The version decides which characters an INFO value has to escape: before
+/// VCF 4.3 a space is one of the reserved characters for this encoding.
+/// [`batch_to_vcf_lines`] writes under [`DEFAULT_VCF_FILE_FORMAT`].
+///
+/// [`header_file_format`]: crate::header_builder::header_file_format
+pub fn batch_to_vcf_lines_for_file_format(
+    batch: &RecordBatch,
+    info_fields: &[String],
+    format_fields: &[String],
+    sample_names: &[String],
+    coordinate_system_zero_based: bool,
+    file_format: &str,
+) -> Result<Vec<VcfRecordLine>> {
     validate_vcf_serializable_genotypes(&batch.schema())?;
 
     let num_rows = batch.num_rows();
@@ -631,7 +814,7 @@ pub fn batch_to_vcf_lines(
     let filters = get_string_column_by_name(batch, "filter")?;
 
     // Build column index maps for INFO and FORMAT fields
-    let info_columns = build_info_column_map(batch, info_fields);
+    let info_columns = build_info_column_map(batch, info_fields, info_forbids_space(file_format));
     let num_samples = sample_names.len();
 
     // Pre-resolve genotype columns for batch-level type resolution (multisample fast path)
@@ -881,15 +1064,35 @@ fn get_optional_f64_column_by_name<'a>(
         .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be Float64 type")))
 }
 
-/// Builds a map from INFO field name to column index
+/// Maps each INFO field to its column index and how its string values are
+/// written: verbatim for a column of joined text (see [`is_joined_info_text`])
+/// or one with nothing to escape anywhere in this batch (see
+/// [`column_needs_escape`]), otherwise percent-encoded, with the space among
+/// the escaped characters when `space_reserved`.
 fn build_info_column_map(
     batch: &RecordBatch,
     info_fields: &[String],
-) -> std::collections::HashMap<String, usize> {
+    space_reserved: bool,
+) -> std::collections::HashMap<String, (usize, InfoEncoding)> {
+    let schema = batch.schema();
     let mut map = std::collections::HashMap::new();
     for field_name in info_fields {
-        if let Ok(idx) = batch.schema().index_of(field_name) {
-            map.insert(field_name.clone(), idx);
+        if let Ok(idx) = schema.index_of(field_name) {
+            let column = batch.column(idx).as_ref();
+            let encoding = if is_joined_info_text(schema.field(idx)) {
+                InfoEncoding::Verbatim
+            } else if space_reserved {
+                if column_needs_escape(column, INFO_RESERVED_BEFORE_4_3) {
+                    InfoEncoding::ReservedAndSpace
+                } else {
+                    InfoEncoding::Verbatim
+                }
+            } else if column_needs_escape(column, INFO_RESERVED) {
+                InfoEncoding::Reserved
+            } else {
+                InfoEncoding::Verbatim
+            };
+            map.insert(field_name.clone(), (idx, encoding));
         }
     }
     map
@@ -961,14 +1164,14 @@ fn build_info_string(
     row: usize,
     field_order: &[&str],
     carried_count: usize,
-    info_columns: &std::collections::HashMap<String, usize>,
+    info_columns: &std::collections::HashMap<String, (usize, InfoEncoding)>,
 ) -> Result<String> {
     let mut info_parts = Vec::new();
 
     for (position, field_name) in field_order.iter().enumerate() {
         let field_name = *field_name;
-        let col_idx = match info_columns.get(field_name) {
-            Some(&idx) => idx,
+        let (col_idx, encoding) = match info_columns.get(field_name) {
+            Some(&entry) => entry,
             None => continue, // Column not in batch, skip
         };
 
@@ -985,7 +1188,7 @@ fn build_info_string(
             continue;
         }
 
-        if let Some(value_str) = extract_info_value_string(column.as_ref(), row)? {
+        if let Some(value_str) = encoding.value_string(column.as_ref(), row)? {
             if value_str == "true" {
                 // Flag type - just include the name
                 info_parts.push(field_name.to_string());
@@ -1004,10 +1207,17 @@ fn build_info_string(
 
 /// Extracts an INFO value as a string from an Arrow array at a specific row
 /// Supports both standard Arrow types and Polars "Large" variants (LargeUtf8, LargeList)
-fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<String>> {
+///
+/// String values are percent-encoded with the `reserved` set, when given.
+fn extract_info_value_string<const N: usize>(
+    array: &dyn Array,
+    row: usize,
+    reserved: Option<&[u8; N]>,
+) -> Result<Option<String>> {
     if array.is_null(row) {
         return Ok(None);
     }
+    let text = |s: &str| string_value(s, reserved);
 
     if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
         return Ok(Some(arr.value(row).to_string()));
@@ -1027,19 +1237,19 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
 
     // Handle Utf8 (StringArray), LargeUtf8 (LargeStringArray), and Utf8View (StringViewArray)
     if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(Some(arr.value(row).to_string()));
+        return Ok(Some(text(arr.value(row))));
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(Some(arr.value(row).to_string()));
+        return Ok(Some(text(arr.value(row))));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
-        return Ok(Some(arr.value(row).to_string()));
+        return Ok(Some(text(arr.value(row))));
     }
 
     // Handle both List and LargeList
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values)?;
+        let value_strings = extract_list_values(&values, reserved)?;
         if value_strings.is_empty() {
             return Ok(None);
         }
@@ -1047,7 +1257,7 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values)?;
+        let value_strings = extract_list_values(&values, reserved)?;
         if value_strings.is_empty() {
             return Ok(None);
         }
@@ -1059,7 +1269,13 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
 
 /// Extracts values from a list array as strings
 /// Supports both standard Arrow types and Polars "Large" variants
-fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
+///
+/// String elements are percent-encoded with the `reserved` set (INFO or
+/// FORMAT), when given, before the caller joins them with `,`.
+fn extract_list_values<const N: usize>(
+    array: &dyn Array,
+    reserved: Option<&[u8; N]>,
+) -> Result<Vec<String>> {
     let mut values = Vec::new();
     let len = array.len();
 
@@ -1092,7 +1308,7 @@ fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(str_arr.value(i).to_string());
+                values.push(string_value(str_arr.value(i), reserved));
             }
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<LargeStringArray>() {
@@ -1101,7 +1317,7 @@ fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(str_arr.value(i).to_string());
+                values.push(string_value(str_arr.value(i), reserved));
             }
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<StringViewArray>() {
@@ -1110,7 +1326,7 @@ fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(str_arr.value(i).to_string());
+                values.push(string_value(str_arr.value(i), reserved));
             }
         }
     }
@@ -1376,27 +1592,27 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(s.to_string());
+        return Ok(percent_encoded(s, FORMAT_RESERVED));
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
         let s = arr.value(row);
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(s.to_string());
+        return Ok(percent_encoded(s, FORMAT_RESERVED));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
         let s = arr.value(row);
         if s.is_empty() {
             return Ok(".".to_string());
         }
-        return Ok(s.to_string());
+        return Ok(percent_encoded(s, FORMAT_RESERVED));
     }
 
     // Handle both List and LargeList
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values)?;
+        let value_strings = extract_list_values(&values, Some(FORMAT_RESERVED))?;
         if value_strings.is_empty() {
             return Ok(".".to_string());
         }
@@ -1404,7 +1620,7 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeListArray>() {
         let values = arr.value(row);
-        let value_strings = extract_list_values(&values)?;
+        let value_strings = extract_list_values(&values, Some(FORMAT_RESERVED))?;
         if value_strings.is_empty() {
             return Ok(".".to_string());
         }
@@ -1422,7 +1638,8 @@ mod tests {
     };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion_bio_format_core::metadata::{
-        VCF_FIELD_FIELD_TYPE_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN,
+        VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_NUMBER_KEY, VCF_FORMAT_KEYS_COLUMN,
+        VCF_INFO_KEYS_COLUMN,
     };
 
     /// A layout column as the reader builds it: named for humans, marked for
@@ -1520,6 +1737,263 @@ mod tests {
                 Err(error) => error.to_string(),
             };
         assert!(error.contains("does not support genotype dosage input"));
+    }
+
+    /// The INFO text of each record of a batch with the core columns and one
+    /// extra INFO column.
+    fn info_with_column(field: Field, column: ArrayRef) -> Vec<String> {
+        info_with_column_for(field, column, DEFAULT_VCF_FILE_FORMAT)
+    }
+
+    /// [`info_with_column`], written under the `##fileformat` `file_format`.
+    fn info_with_column_for(field: Field, column: ArrayRef, file_format: &str) -> Vec<String> {
+        let rows = column.len();
+        let mut fields = create_test_schema().fields().to_vec();
+        let name = field.name().clone();
+        fields.push(Arc::new(field));
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"; rows])),
+                Arc::new(UInt32Array::from(vec![99u32; rows])),
+                Arc::new(UInt32Array::from(vec![100u32; rows])),
+                Arc::new(StringArray::from(vec![Some("rs1"); rows])),
+                Arc::new(StringArray::from(vec!["A"; rows])),
+                Arc::new(StringArray::from(vec!["G"; rows])),
+                Arc::new(Float64Array::from(vec![Some(30.0); rows])),
+                Arc::new(StringArray::from(vec![Some("PASS"); rows])),
+                column,
+            ],
+        )
+        .unwrap();
+        batch_to_vcf_lines_for_file_format(&batch, &[name], &[], &[], true, file_format)
+            .unwrap()
+            .iter()
+            .map(|line| line.line.split('\t').nth(7).unwrap().to_string())
+            .collect()
+    }
+
+    /// One record with the core columns and one extra INFO column.
+    fn line_with_info_column(field: Field, column: ArrayRef) -> String {
+        info_with_column(field, column).swap_remove(0)
+    }
+
+    fn with_number(field: Field, number: &str) -> Field {
+        field.with_metadata(std::collections::HashMap::from([(
+            VCF_FIELD_NUMBER_KEY.to_string(),
+            number.to_string(),
+        )]))
+    }
+
+    #[test]
+    fn a_scalar_info_string_is_percent_encoded() {
+        let info = line_with_info_column(
+            with_number(Field::new("X", DataType::Utf8, true), "1"),
+            Arc::new(StringArray::from(vec![Some("k=v;w,x%y\tz")])),
+        );
+        assert_eq!(info, "X=k%3Dv%3Bw%2Cx%25y%09z");
+    }
+
+    #[test]
+    fn a_scalar_info_string_without_metadata_is_percent_encoded() {
+        let info = line_with_info_column(
+            Field::new("X", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("a;b")])),
+        );
+        assert_eq!(info, "X=a%3Bb");
+    }
+
+    #[test]
+    fn each_list_element_is_encoded_before_the_join() {
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        builder.values().append_value("a,b");
+        builder.values().append_value("c;d");
+        builder.append(true);
+        let info = line_with_info_column(
+            Field::new(
+                "L",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Arc::new(builder.finish()),
+        );
+        assert_eq!(info, "L=a%2Cb,c%3Bd");
+    }
+
+    #[test]
+    fn unreserved_characters_stay_literal() {
+        let info = line_with_info_column(
+            Field::new("D", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("MedGen:C1|a\u{2013}b é")])),
+        );
+        assert_eq!(info, "D=MedGen:C1|a\u{2013}b é");
+    }
+
+    /// Whether a column is encoded is decided once per batch, so a reserved
+    /// character in one record must still be encoded alongside clean ones.
+    #[test]
+    fn a_reserved_character_in_one_record_is_encoded_among_clean_ones() {
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        builder.values().append_value("plain");
+        builder.append(true);
+        builder.values().append_value("x");
+        builder.values().append_value("y=z");
+        builder.append(true);
+        let lists = info_with_column(
+            Field::new(
+                "L",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Arc::new(builder.finish()),
+        );
+        assert_eq!(lists, ["L=plain", "L=x,y%3Dz"]);
+
+        let scalars = info_with_column(
+            Field::new("X", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("a"), None, Some("b;c")])),
+        );
+        assert_eq!(scalars, ["X=a", ".", "X=b%3Bc"]);
+    }
+
+    /// The scan compares 32 bytes at a time, then the remainder one by one: a
+    /// reserved byte has to be found at every offset of either part.
+    #[test]
+    fn the_escape_scan_finds_a_reserved_byte_at_any_offset() {
+        for len in [1, 31, 32, 33, 64, 70] {
+            assert!(!needs_escape(&vec![b'a'; len], INFO_RESERVED));
+            for offset in 0..len {
+                for reserved in [b';', b'=', b'%', b',', b'\t', 0x00, 0x1f, 0x7f] {
+                    let mut bytes = vec![b'a'; len];
+                    bytes[offset] = reserved;
+                    assert!(
+                        needs_escape(&bytes, INFO_RESERVED),
+                        "{reserved:#04x} at {offset} of {len}"
+                    );
+                }
+            }
+        }
+        assert!(!needs_escape(
+            "é\u{2013}:|".repeat(20).as_bytes(),
+            INFO_RESERVED
+        ));
+        assert!(needs_escape(b"a:b", FORMAT_RESERVED));
+        assert!(!needs_escape(b"a;b=c", FORMAT_RESERVED));
+        for len in [1, 31, 32, 33, 64, 70] {
+            for offset in 0..len {
+                let mut bytes = vec![b'a'; len];
+                bytes[offset] = b' ';
+                assert!(!needs_escape(&bytes, INFO_RESERVED));
+                assert!(
+                    needs_escape(&bytes, INFO_RESERVED_BEFORE_4_3),
+                    "space at {offset} of {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_versions_before_4_3_forbid_a_space_in_info() {
+        for file_format in ["VCFv4.0", "VCFv4.1", "VCFv4.2", "VCFv3.3"] {
+            assert!(info_forbids_space(file_format), "{file_format}");
+        }
+        for file_format in [
+            "VCFv4.3", "VCFv4.4", "VCFv4.5", "VCFv5.0", "VCFv4", "4.1", "",
+        ] {
+            assert!(!info_forbids_space(file_format), "{file_format}");
+        }
+    }
+
+    /// VCF 4.1 and 4.2 allow no whitespace in an INFO value, so a space the
+    /// reader decoded from `%20` is encoded again under those headers. From 4.3,
+    /// which allows spaces, and by default it stays literal.
+    #[test]
+    fn a_space_in_info_is_encoded_only_before_vcf_4_3() {
+        let column = || -> ArrayRef {
+            Arc::new(StringArray::from(vec![
+                Some("base_change=ins A"),
+                Some("ins A"),
+                Some("plain"),
+            ]))
+        };
+        let field = || Field::new("CLNVI", DataType::Utf8, true);
+        for file_format in ["VCFv4.1", "VCFv4.2"] {
+            assert_eq!(
+                info_with_column_for(field(), column(), file_format),
+                [
+                    "CLNVI=base_change%3Dins%20A",
+                    "CLNVI=ins%20A",
+                    "CLNVI=plain"
+                ],
+                "{file_format}"
+            );
+        }
+        for file_format in ["VCFv4.3", "VCFv4.5"] {
+            assert_eq!(
+                info_with_column_for(field(), column(), file_format),
+                ["CLNVI=base_change%3Dins A", "CLNVI=ins A", "CLNVI=plain"],
+                "{file_format}"
+            );
+        }
+        assert_eq!(
+            info_with_column(field(), column()),
+            ["CLNVI=base_change%3Dins A", "CLNVI=ins A", "CLNVI=plain"]
+        );
+    }
+
+    /// The space rule is per element of a list, like the other escapes, and
+    /// never reaches a column of joined text such as CSQ.
+    #[test]
+    fn a_space_before_vcf_4_3_is_encoded_per_list_element_but_not_in_joined_text() {
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        builder.values().append_value("a b");
+        builder.values().append_value("c");
+        builder.append(true);
+        let list = info_with_column_for(
+            Field::new(
+                "L",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Arc::new(builder.finish()),
+            "VCFv4.2",
+        );
+        assert_eq!(list, ["L=a%20b,c"]);
+
+        let csq = "T|intron_variant|a b";
+        let joined = info_with_column_for(
+            with_number(Field::new("CSQ", DataType::Utf8, true), "."),
+            Arc::new(StringArray::from(vec![Some(csq)])),
+            "VCFv4.2",
+        );
+        assert_eq!(joined, [format!("CSQ={csq}")]);
+    }
+
+    /// A scalar string column declared `Number=.` already holds joined VCF
+    /// text — the engine's CSQ, escaped by the VEP rules, with `,` between its
+    /// blocks. The reader never produces that shape (it reads such a field as a
+    /// list), so writing it verbatim cannot skip an input value.
+    #[test]
+    fn an_already_joined_scalar_column_is_written_verbatim() {
+        let csq = "T|synonymous_variant|p.Ala125%3D|a=b,T|intron_variant||";
+        let info = line_with_info_column(
+            with_number(Field::new("CSQ", DataType::Utf8, true), "."),
+            Arc::new(StringArray::from(vec![Some(csq)])),
+        );
+        assert_eq!(info, format!("CSQ={csq}"));
+    }
+
+    /// Only `Number=.` marks joined text: a scalar declared with another
+    /// cardinality is an ordinary value and is encoded.
+    #[test]
+    fn a_scalar_column_declared_number_a_is_still_encoded() {
+        for number in ["A", "R", "G", "2"] {
+            let info = line_with_info_column(
+                with_number(Field::new("X", DataType::Utf8, true), number),
+                Arc::new(StringArray::from(vec![Some("a;b=c")])),
+            );
+            assert_eq!(info, "X=a%3Bb%3Dc", "Number={number}");
+        }
     }
 
     #[test]

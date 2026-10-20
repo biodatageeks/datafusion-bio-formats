@@ -767,6 +767,9 @@ pub(crate) fn load_infos_single_pass(
                 Some(Value::String(v)) => {
                     builder.append_string(&v)?;
                 }
+                Some(Value::Character(v)) => {
+                    builder.append_string(&v.to_string())?;
+                }
                 Some(Value::Array(ValueArray::String(values))) => {
                     let strings: Vec<Option<String>> = values
                         .iter()
@@ -774,6 +777,14 @@ pub(crate) fn load_infos_single_pass(
                         .collect::<std::io::Result<_>>()
                         .map_err(|e| info_array_error(key, e))?;
                     builder.append_array_string_nullable(strings)?;
+                }
+                Some(Value::Array(ValueArray::Character(values))) => {
+                    let characters: Vec<Option<String>> = values
+                        .iter()
+                        .map(|result| result.map(|value| value.map(|c| c.to_string())))
+                        .collect::<std::io::Result<_>>()
+                        .map_err(|e| info_array_error(key, e))?;
+                    builder.append_array_string_nullable(characters)?;
                 }
                 Some(Value::Flag) => {
                     builder.append_boolean(true)?;
@@ -784,11 +795,6 @@ pub(crate) fn load_infos_single_pass(
                     } else {
                         builder.append_null()?;
                     }
-                }
-                _ => {
-                    return Err(datafusion::arrow::error::ArrowError::InvalidArgumentError(
-                        format!("Unsupported INFO value type for field '{key}'"),
-                    ));
                 }
             }
         }
