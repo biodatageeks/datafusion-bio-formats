@@ -141,6 +141,12 @@ of transcripts that would otherwise have no exon entries.
 | `spliced_seq` | Utf8 | yes | Spliced transcript sequence |
 | `flags_str` | Utf8 | yes | CDS NF flags in VEP encounter order (e.g. `cds_start_NF&cds_end_NF`) |
 
+**Coordinate contract:** transcript `start` and `end` follow the configured
+`coordinate_system_zero_based` option. `gene_start` and `gene_end` always remain
+1-based inclusive, regardless of that option, because they represent the raw
+Ensembl gene bounds used for VEP cache-region membership. Each field carries
+`bio.vep.gene_bounds_coordinate_system=1-based-inclusive` metadata.
+
 ### Exon
 
 Standalone exon table — one row per exon per transcript.

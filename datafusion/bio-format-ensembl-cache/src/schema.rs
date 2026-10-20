@@ -6,6 +6,17 @@ use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+const GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_KEY: &str = "bio.vep.gene_bounds_coordinate_system";
+const GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_VALUE: &str = "1-based-inclusive";
+
+fn gene_bounds_field(name: &str) -> Field {
+    let metadata = HashMap::from([(
+        GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_KEY.to_string(),
+        GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_VALUE.to_string(),
+    )]);
+    Field::new(name, DataType::Int64, true).with_metadata(metadata)
+}
+
 /// Returns the Arrow `DataType` for the exons column:
 /// `List<Struct<start:Int64, end:Int64, phase:Int8>>`.
 pub(crate) fn exon_list_data_type() -> DataType {
@@ -202,10 +213,11 @@ pub(crate) fn transcript_schema(
         Field::new("source", DataType::Utf8, true),
         Field::new("is_canonical", DataType::Boolean, true),
         Field::new("gene_stable_id", DataType::Utf8, true),
-        // Raw 1-based inclusive bounds of the containing Ensembl gene. VEP
-        // assigns transcripts to cache regions by gene overlap.
-        Field::new("gene_start", DataType::Int64, true),
-        Field::new("gene_end", DataType::Int64, true),
+        // Raw 1-based inclusive bounds of the containing Ensembl gene. These
+        // stay 1-based when transcript start/end are configured as zero-based,
+        // matching VEP's cache-region membership arithmetic.
+        gene_bounds_field("gene_start"),
+        gene_bounds_field("gene_end"),
         Field::new("gene_symbol", DataType::Utf8, true),
         Field::new("gene_symbol_source", DataType::Utf8, true),
         // Cache export keeps both columns at the native VEP value so downstream
@@ -724,6 +736,27 @@ mod tests {
         assert!(schema.column_with_name("mane_select").is_some());
         assert!(schema.column_with_name("raw_object_json").is_some());
         assert!(schema.column_with_name("object_hash").is_some());
+    }
+
+    #[test]
+    fn transcript_gene_bounds_keep_1based_metadata_in_both_coordinate_modes() {
+        let info = test_cache_info();
+        for zero_based in [false, true] {
+            let schema = transcript_schema(&info, zero_based, CacheSourceType::Merged);
+            assert_eq!(
+                schema.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
+                Some(&zero_based.to_string())
+            );
+            for name in ["gene_start", "gene_end"] {
+                let field = schema.field_with_name(name).unwrap();
+                assert_eq!(
+                    field
+                        .metadata()
+                        .get(GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_KEY),
+                    Some(&GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_VALUE.to_string())
+                );
+            }
+        }
     }
 
     #[test]

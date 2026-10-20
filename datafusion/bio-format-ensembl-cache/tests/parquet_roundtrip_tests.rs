@@ -956,12 +956,10 @@ async fn transcript_parquet_roundtrip_translation_seq_edits() -> datafusion::com
             if !wanted.contains(&ids.value(i)) {
                 continue;
             }
-            if ids.value(i) == "NM_001315491.2" {
-                assert!(!gene_start.is_null(i));
-                assert!(!gene_end.is_null(i));
-                assert!(gene_start.value(i) <= tx_start.value(i));
-                assert!(gene_end.value(i) >= tx_end.value(i));
-            }
+            assert!(!gene_start.is_null(i));
+            assert!(!gene_end.is_null(i));
+            assert!(gene_start.value(i) <= tx_start.value(i));
+            assert!(gene_end.value(i) >= tx_end.value(i));
             let value = (!lists.is_null(i)).then(|| {
                 let values = lists.value(i);
                 let s = values.as_any().downcast_ref::<StructArray>().unwrap();
