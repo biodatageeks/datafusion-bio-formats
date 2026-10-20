@@ -7,7 +7,7 @@
 //!
 //! When metadata is not available, sensible defaults are generated from Arrow types.
 
-use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
@@ -35,6 +35,31 @@ pub const QUAL_IDX: usize = 6;
 pub const FILTER_IDX: usize = 7;
 /// Number of core VCF columns (before INFO fields)
 pub const CORE_FIELD_COUNT: usize = 8;
+
+/// The `##fileformat` written when the schema names none.
+pub const DEFAULT_VCF_FILE_FORMAT: &str = "VCFv4.3";
+
+/// The `##fileformat` version [`build_vcf_header_lines`] writes for `schema`:
+/// `bio.vcf.file_format` when set, which also replaces a captured source line;
+/// otherwise the captured `##fileformat` line, then [`DEFAULT_VCF_FILE_FORMAT`].
+///
+/// The record serializer takes the same value, since which characters a value
+/// may hold depends on the version the file declares.
+pub fn header_file_format(schema: &Schema) -> String {
+    let metadata = schema.metadata();
+    if let Some(file_format) = metadata.get(VCF_FILE_FORMAT_KEY) {
+        return file_format.clone();
+    }
+    metadata
+        .get(VCF_HEADER_RAW_LINES_KEY)
+        .and_then(|raw_json| from_json_string::<Vec<String>>(raw_json))
+        .and_then(|raw_lines| {
+            raw_lines
+                .iter()
+                .find_map(|line| line.strip_prefix("##fileformat=").map(str::to_string))
+        })
+        .unwrap_or_else(|| DEFAULT_VCF_FILE_FORMAT.to_string())
+}
 
 /// Builds VCF header lines from an Arrow schema with INFO and FORMAT field definitions
 ///
@@ -83,12 +108,7 @@ pub fn build_vcf_header_lines(
         ));
     }
 
-    // Get file format from schema metadata (default to VCFv4.3)
-    let file_format = schema_metadata
-        .get(VCF_FILE_FORMAT_KEY)
-        .map(|s| s.as_str())
-        .unwrap_or("VCFv4.3");
-    lines.push(format!("##fileformat={file_format}"));
+    lines.push(format!("##fileformat={}", header_file_format(schema)));
 
     // Add FILTER definitions from metadata using shared utilities
     if let Some(filters_json) = schema_metadata.get(VCF_FILTERS_KEY)
@@ -833,6 +853,41 @@ mod tests {
             "{lines:#?}"
         );
         assert_eq!(lines[0], "##fileformat=VCFv4.3");
+    }
+
+    /// The serializer escapes by the version the header declares, so
+    /// [`header_file_format`] must name the very line the header writes.
+    #[test]
+    fn the_file_format_handed_to_the_serializer_is_the_one_written() {
+        let raw = ["##fileformat=VCFv4.1", "##contig=<ID=chr1,length=100>"];
+        let raw_only = schema_with_raw_header(&raw, &[]);
+        let typed_over_raw =
+            with_typed(schema_with_raw_header(&raw, &[]), Some("VCFv4.2"), &[], &[]);
+        let typed_only = with_typed(
+            Arc::new(Schema::new(vec![Field::new(
+                "chrom",
+                DataType::Utf8,
+                false,
+            )])),
+            Some("VCFv4.2"),
+            &[],
+            &[],
+        );
+        let neither = Arc::new(Schema::new(vec![Field::new(
+            "chrom",
+            DataType::Utf8,
+            false,
+        )]));
+        for (schema, expected) in [
+            (raw_only, "VCFv4.1"),
+            (typed_over_raw, "VCFv4.2"),
+            (typed_only, "VCFv4.2"),
+            (neither, DEFAULT_VCF_FILE_FORMAT),
+        ] {
+            let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+            assert_eq!(header_file_format(&schema), expected);
+            assert_eq!(lines[0], format!("##fileformat={expected}"));
+        }
     }
 
     #[test]
