@@ -1,13 +1,13 @@
 use crate::errors::{Result, exec_err};
 use crate::info::{CacheInfo, VEP_CACHE_BAM_EDITED_METADATA_KEY, VEP_CACHE_VERSION_METADATA_KEY};
 use crate::source_type::{CacheSourceType, VEP_CACHE_SOURCE_TYPE_METADATA_KEY};
+use crate::{
+    GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_KEY, GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_VALUE,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-const GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_KEY: &str = "bio.vep.gene_bounds_coordinate_system";
-const GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_VALUE: &str = "1-based-inclusive";
 
 fn gene_bounds_field(name: &str) -> Field {
     let metadata = HashMap::from([(

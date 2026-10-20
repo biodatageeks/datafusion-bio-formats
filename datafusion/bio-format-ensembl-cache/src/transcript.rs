@@ -4230,6 +4230,7 @@ mod tests {
     }
 
     fn json_gene_bounds(bounds: Option<(Option<i64>, Option<i64>)>) -> (Option<i64>, Option<i64>) {
+        // The Storable decoder recognizes the JSON: prefix and exercises the JSON extraction path.
         let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
         let mut payload = json!({
             "stable_id": "NR_187205.1",
