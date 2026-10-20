@@ -608,6 +608,13 @@ async fn transcript_schema_contains_vep_columns() -> datafusion::common::Result<
 
     assert!(schema.field_with_name("cdna_seq").is_ok());
     assert!(schema.field_with_name("peptide_seq").is_ok());
+    for name in ["gene_start", "gene_end"] {
+        let field = schema
+            .field_with_name(name)
+            .expect("gene bound column missing");
+        assert_eq!(field.data_type(), &DataType::Int64);
+        assert!(field.is_nullable());
+    }
     assert!(schema.field_with_name("codon_table").is_ok());
     assert!(schema.field_with_name("tsl").is_ok());
     assert!(schema.field_with_name("mane_select").is_ok());

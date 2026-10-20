@@ -922,6 +922,30 @@ async fn transcript_parquet_roundtrip_translation_seq_edits() -> datafusion::com
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
+        let tx_start = batch
+            .column_by_name("start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let tx_end = batch
+            .column_by_name("end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let gene_start = batch
+            .column_by_name("gene_start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let gene_end = batch
+            .column_by_name("gene_end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         let lists = batch
             .column_by_name("translation_seq_edits")
             .unwrap()
@@ -931,6 +955,12 @@ async fn transcript_parquet_roundtrip_translation_seq_edits() -> datafusion::com
         for i in 0..batch.num_rows() {
             if !wanted.contains(&ids.value(i)) {
                 continue;
+            }
+            if ids.value(i) == "NM_001315491.2" {
+                assert!(!gene_start.is_null(i));
+                assert!(!gene_end.is_null(i));
+                assert!(gene_start.value(i) <= tx_start.value(i));
+                assert!(gene_end.value(i) >= tx_end.value(i));
             }
             let value = (!lists.is_null(i)).then(|| {
                 let values = lists.value(i);

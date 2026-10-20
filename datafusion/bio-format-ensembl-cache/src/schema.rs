@@ -202,6 +202,10 @@ pub(crate) fn transcript_schema(
         Field::new("source", DataType::Utf8, true),
         Field::new("is_canonical", DataType::Boolean, true),
         Field::new("gene_stable_id", DataType::Utf8, true),
+        // Raw 1-based inclusive bounds of the containing Ensembl gene. VEP
+        // assigns transcripts to cache regions by gene overlap.
+        Field::new("gene_start", DataType::Int64, true),
+        Field::new("gene_end", DataType::Int64, true),
         Field::new("gene_symbol", DataType::Utf8, true),
         Field::new("gene_symbol_source", DataType::Utf8, true),
         // Cache export keeps both columns at the native VEP value so downstream
@@ -706,6 +710,11 @@ mod tests {
         assert!(schema.column_with_name("db_id").is_some());
         assert!(schema.column_with_name("biotype").is_some());
         assert!(schema.column_with_name("gene_stable_id").is_some());
+        for name in ["gene_start", "gene_end"] {
+            let (_, field) = schema.column_with_name(name).unwrap();
+            assert_eq!(field.data_type(), &DataType::Int64);
+            assert!(field.is_nullable());
+        }
         assert!(schema.column_with_name("exons").is_some());
         assert!(schema.column_with_name("cdna_seq").is_some());
         assert!(schema.column_with_name("translateable_seq").is_some());

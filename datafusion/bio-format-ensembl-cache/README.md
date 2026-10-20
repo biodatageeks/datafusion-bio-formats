@@ -96,6 +96,8 @@ of transcripts that would otherwise have no exon entries.
 | `source` | Utf8 | yes | Source database |
 | `is_canonical` | Boolean | yes | Whether this is the canonical transcript |
 | `gene_stable_id` | Utf8 | yes | Parent gene ID (ENSG...) |
+| `gene_start` | Int64 | yes | Parent gene's 1-based inclusive start; null with `gene_end` if either raw bound is unavailable |
+| `gene_end` | Int64 | yes | Parent gene's 1-based inclusive end; null with `gene_start` if either raw bound is unavailable |
 | `gene_symbol` | Utf8 | yes | Gene symbol (e.g. BRCA1) |
 | `gene_symbol_source` | Utf8 | yes | Gene symbol source (e.g. HGNC) |
 | `gene_hgnc_id` | Utf8 | yes | HGNC ID parsed from the raw VEP object, with no export-time propagation/backfill |
