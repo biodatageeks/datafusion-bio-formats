@@ -39,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ensembl cache transcripts take `cds_start`/`cds_end` from the translation
+  (`start`/`end` on the unedited `start_exon`/`end_exon`), as Ensembl's
+  `Transcript::coding_region_start/end` does, instead of mapping
+  `cdna_coding_start/end` through the raw exons. RefSeq transcripts with a cDNA
+  indel `_rna_edit` upstream of a bound no longer get that bound shifted by the
+  edit length (614 transcripts in the VEP 116 merged cache, e.g. PTEN
+  NM_001304718.2, HTT NM_002111.8, ALMS1 NM_015120.4). The translation-derived
+  bound is no longer dropped when it lies outside the transcript span, since
+  Ensembl applies no such check (biodatageeks/vepyr#214).
 - PGEN companion limit errors name the option to raise
   (`max_companion_bytes`, `max_decompressed_companion_bytes`) and its
   configured value, as `max_variants` and `max_samples` already did
@@ -58,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ensembl cache transcripts gain a `translation_seq_edits` column,
+  `List<Struct<code, start, end, alt_seq>>`, read from
+  `_variation_effect_feature_cache->{seq_edits}`: the translation SeqEdits
+  (`initial_met`, `_selenocysteine`, `amino_acid_sub`, `_stop_codon_rt`) that
+  VEP applies to the reference peptide. It is the only offline copy, since the
+  VEP dumper deletes the translation's attributes. NULL when the key is absent
+  (untranslated transcripts), `[]` when present and empty; entries keep source
+  order and an empty `alt_seq` stays `""`. The column is additive and nothing
+  reads it yet (biodatageeks/vepyr#241, #205).
 - `gzip_multi_member_decoder` helper in `bio-format-core` for multi-member gzip decoding
 - CRAM file format support with reference-based compression
 - FASTA file format support for biological sequences

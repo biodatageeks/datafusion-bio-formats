@@ -10,9 +10,9 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
 use crate::util::{
-    BatchBuilder, ColumnMap, RefseqEditTuple, canonical_json_string, json_bool, json_i32, json_i64,
-    json_str, normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_bool,
-    parse_i64, stable_hash,
+    BatchBuilder, ColumnMap, RefseqEditTuple, SeqEditTuple, canonical_json_string, json_bool,
+    json_i32, json_i64, json_str, normalize_genomic_end, normalize_genomic_start,
+    open_binary_reader, parse_bool, parse_i64, stable_hash,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -61,6 +61,7 @@ pub(crate) struct TranscriptColumnIndices {
     peptide_seq: Option<usize>,
     sequences_projected: bool,
     codon_table: Option<usize>,
+    translation_seq_edits: Option<usize>,
     tsl: Option<usize>,
     appris: Option<usize>,
     mane_select: Option<usize>,
@@ -170,6 +171,7 @@ impl TranscriptColumnIndices {
             peptide_seq,
             sequences_projected,
             codon_table: col_map.get("codon_table"),
+            translation_seq_edits: col_map.get("translation_seq_edits"),
             tsl: col_map.get("tsl"),
             appris: col_map.get("appris"),
             mane_select: col_map.get("mane_select"),
@@ -413,17 +415,20 @@ fn derive_coding_region(
 }
 
 /// Derives `(coding_region_start, coding_region_end)` from the Translation
-/// sub-object's `start_exon`/`end_exon` references.  This is VEP's own method
-/// (`Translation::genomic_start`/`genomic_end`) and works even when the
-/// transcript's exon array is incomplete due to storable alias eviction.
+/// sub-object's `start`/`end` and `start_exon`/`end_exon` references.  This is
+/// Ensembl's own method, `Transcript::coding_region_start/end`
+/// (Transcript.pm:1087-1154), which VEP evaluates lazily because the cache
+/// stores both as undef.  It reads the unedited exons and ignores RNA edits,
+/// and it works even when the transcript's exon array is incomplete due to
+/// storable alias eviction.
 ///
-/// For + strand: `cds_start = start_exon.start + tl.start - 1`
-/// For − strand: `cds_start = start_exon.end - tl.start + 1`
+/// For + strand: `start = start_exon.start + tl.start - 1`,
+///               `end   = end_exon.start + tl.end - 1`
+/// For − strand: `start = end_exon.end - (tl.end - 1)`,
+///               `end   = start_exon.end - (tl.start - 1)`
 fn derive_coding_region_from_translation_json(
     object: &serde_json::Map<String, Value>,
     strand: i8,
-    tx_start: i64,
-    tx_end: i64,
 ) -> (Option<i64>, Option<i64>) {
     let tl = object
         .get("translation")
@@ -438,23 +443,14 @@ fn derive_coding_region_from_translation_json(
         .get("start_exon")
         .and_then(unwrap_blessed_object_optional);
     let ee = tl.get("end_exon").and_then(unwrap_blessed_object_optional);
-    compute_cds_from_translation_exons(
-        tl_start,
-        tl_end,
-        se,
-        ee,
-        strand,
-        tx_start,
-        tx_end,
-        |obj, key| json_i64(obj.get(key)),
-    )
+    compute_cds_from_translation_exons(tl_start, tl_end, se, ee, strand, |obj, key| {
+        json_i64(obj.get(key))
+    })
 }
 
 fn derive_coding_region_from_translation_storable(
     object: &std::collections::HashMap<String, SValue>,
     strand: i8,
-    tx_start: i64,
-    tx_end: i64,
 ) -> (Option<i64>, Option<i64>) {
     let tl = object.get("translation").and_then(SValue::as_hash);
     let tl = match tl {
@@ -465,27 +461,28 @@ fn derive_coding_region_from_translation_storable(
     let tl_end = sv_i64(tl.get("end"));
     let se = tl.get("start_exon").and_then(SValue::as_hash);
     let ee = tl.get("end_exon").and_then(SValue::as_hash);
-    compute_cds_from_translation_exons(
-        tl_start,
-        tl_end,
-        se,
-        ee,
-        strand,
-        tx_start,
-        tx_end,
-        |obj, key| sv_i64(obj.get(key)),
-    )
+    compute_cds_from_translation_exons(tl_start, tl_end, se, ee, strand, |obj, key| {
+        sv_i64(obj.get(key))
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Ensembl's `coding_region_start/end` arithmetic.  There is deliberately no
+/// check against the transcript span: Ensembl has none, so a bound outside it
+/// is VEP's bound and is kept.
+///
+/// The `min`/`max` at the end is not in Ensembl, which returns the pair as
+/// computed.  On well-formed data (every translated transcript of the pinned
+/// caches) start <= end already, so it is a no-op; on malformed data it keeps
+/// the pair ordered rather than crossing the bounds.
+///
+/// Returns `(Some, Some)` or `(None, None)`, never a mix, so callers may test
+/// either half for the fallback.
 fn compute_cds_from_translation_exons<T>(
     tl_start: Option<i64>,
     tl_end: Option<i64>,
     start_exon: Option<&T>,
     end_exon: Option<&T>,
     strand: i8,
-    tx_start: i64,
-    tx_end: i64,
     get_i64: impl Fn(&T, &str) -> Option<i64>,
 ) -> (Option<i64>, Option<i64>) {
     let (Some(tl_s), Some(tl_e)) = (tl_start, tl_end) else {
@@ -515,13 +512,10 @@ fn compute_cds_from_translation_exons<T>(
         };
         (ee_end - tl_e + 1, se_end - tl_s + 1)
     };
-    let cr_start = genomic_start.min(genomic_end);
-    let cr_end = genomic_start.max(genomic_end);
-    if cr_start >= tx_start && cr_end <= tx_end {
-        (Some(cr_start), Some(cr_end))
-    } else {
-        (None, None)
-    }
+    (
+        Some(genomic_start.min(genomic_end)),
+        Some(genomic_start.max(genomic_end)),
+    )
 }
 
 fn non_dash_string(value: Option<String>) -> Option<String> {
@@ -1193,6 +1187,83 @@ fn storable_promoted_vef_i32(
         .or_else(|| parse(object.get(key)))
 }
 
+// ---------------------------------------------------------------------------
+// Translation SeqEdits
+// ---------------------------------------------------------------------------
+//
+// The VEP dumper deletes the translation's attributes (DumpVEP Core.pm:232),
+// so `_variation_effect_feature_cache->{seq_edits}`, filled from
+// `Translation::get_all_SeqEdits` (AnnotationSource/Database/Transcript.pm:484),
+// is the only offline copy of the edits. Each entry is a blessed
+// `Bio::EnsEMBL::SeqEdit` hash with `code`, `start`, `end` (often Perl
+// strings) and `alt_seq`.
+//
+// - VEFC or key absent -> None (NULL); key present -> the list in source order,
+//   unsorted, since VEP iterates it as stored (TVA.pm:752).
+// - Undef `alt_seq` becomes "", as `SeqEdit::new` does (`$alt_seq ||= ''`).
+// - An entry whose start/end does not parse is skipped: `SeqEdit::new` throws
+//   on those at dump time, so none can exist in a VEP-built cache.
+
+fn storable_translation_seq_edits(
+    object: &std::collections::HashMap<String, SValue>,
+) -> Option<Vec<SeqEditTuple>> {
+    let edits = object
+        .get("_variation_effect_feature_cache")
+        .and_then(SValue::as_hash)?
+        .get("seq_edits")?
+        .as_array()?;
+    Some(
+        edits
+            .iter()
+            .filter_map(|edit| {
+                let edit = edit.as_hash()?;
+                let start = sv_i64(edit.get("start"))?;
+                let end = sv_i64(edit.get("end"))?;
+                let code = edit
+                    .get("code")
+                    .and_then(SValue::as_string)
+                    .unwrap_or_default();
+                let alt_seq = edit
+                    .get("alt_seq")
+                    .and_then(SValue::as_string)
+                    .unwrap_or_default();
+                Some((code, start, end, alt_seq))
+            })
+            .collect(),
+    )
+}
+
+fn json_translation_seq_edits(
+    object: &serde_json::Map<String, Value>,
+) -> Option<Vec<SeqEditTuple>> {
+    let edits = object
+        .get("_variation_effect_feature_cache")
+        .and_then(unwrap_blessed_object_optional)?
+        .get("seq_edits")?
+        .as_array()?;
+    let text = |value: Option<&Value>| match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    Some(
+        edits
+            .iter()
+            .filter_map(|edit| {
+                let edit = unwrap_blessed_object_optional(edit)?;
+                let start = json_i64(edit.get("start"))?;
+                let end = json_i64(edit.get("end"))?;
+                Some((
+                    text(edit.get("code")),
+                    start,
+                    end,
+                    text(edit.get("alt_seq")),
+                ))
+            })
+            .collect(),
+    )
+}
+
 fn json_sequence_value(value: Option<&Value>) -> Option<String> {
     let value = value?;
     json_str(Some(value)).or_else(|| {
@@ -1458,8 +1529,8 @@ pub(crate) fn parse_transcript_line_into(
         let value = json_source_cache(object);
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
-    // coding_region_start/end: read from object first; if null, derive from
-    // cdna_coding_start/end + exon array (same derivation as storable path).
+    // coding_region_start/end: read from the object first. VEP caches store
+    // both as undef, so derive them as Ensembl does (see below).
     let cdna_coding_start_val = json_i64(object.get("cdna_coding_start"));
     let cdna_coding_end_val = json_i64(object.get("cdna_coding_end"));
 
@@ -1470,25 +1541,26 @@ pub(crate) fn parse_transcript_line_into(
         && coding_region_start_val.is_none()
         && coding_region_end_val.is_none()
     {
-        // Primary: derive from cdna positions + exon array
-        if let Some(exon_coords) = extract_exon_coords_json(object) {
+        // Primary: VEP's own method, Transcript::coding_region_start/end
+        // (Transcript.pm:1087-1154): translation start/end on the unedited
+        // translation.start_exon/end_exon. RefSeq cDNA indel edits do not move it.
+        let (derived_start, derived_end) =
+            derive_coding_region_from_translation_json(object, strand);
+        coding_region_start_val = derived_start;
+        coding_region_end_val = derived_end;
+        // Fallback: map cdna_coding_start/end through the raw exon array, for a
+        // translation whose start_exon/end_exon did not survive storable alias
+        // eviction. This ignores RNA edits, so it is only a last resort. The
+        // translation path yields both halves or neither, so testing the start
+        // is enough.
+        if coding_region_start_val.is_none()
+            && let Some(exon_coords) = extract_exon_coords_json(object)
+        {
             let (derived_start, derived_end) = derive_coding_region(
                 &exon_coords,
                 strand,
                 cdna_coding_start_val,
                 cdna_coding_end_val,
-                source_start,
-                source_end,
-            );
-            coding_region_start_val = derived_start;
-            coding_region_end_val = derived_end;
-        }
-        // Fallback: derive from translation.start_exon/end_exon (VEP's own method).
-        // Works even when exon array is incomplete due to storable alias eviction.
-        if coding_region_start_val.is_none() {
-            let (derived_start, derived_end) = derive_coding_region_from_translation_json(
-                object,
-                strand,
                 source_start,
                 source_end,
             );
@@ -1620,6 +1692,9 @@ pub(crate) fn parse_transcript_line_into(
     // MT transcripts store "2" there as a string.
     if let Some(idx) = col_idx.codon_table {
         batch.set_opt_i32(idx, json_promoted_vef_i32(object, "codon_table"));
+    }
+    if let Some(idx) = col_idx.translation_seq_edits {
+        batch.set_seq_edit_list(idx, json_translation_seq_edits(object).as_deref());
     }
     // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     // Fall back to top-level "tsl" for forward-compat with future cache formats.
@@ -2017,8 +2092,8 @@ fn append_transcript_storable_row_into(
         let value = storable_source_cache(object);
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
-    // coding_region_start/end: read from object first; if undef (common in
-    // storable binary), derive from cdna_coding_start/end + exon array.
+    // coding_region_start/end: read from the object first. VEP caches store
+    // both as undef, so derive them as Ensembl does (see below).
     let cdna_coding_start_val = sv_i64(object.get("cdna_coding_start"));
     let cdna_coding_end_val = sv_i64(object.get("cdna_coding_end"));
 
@@ -2029,25 +2104,26 @@ fn append_transcript_storable_row_into(
         && coding_region_start_val.is_none()
         && coding_region_end_val.is_none()
     {
-        // Primary: derive from cdna positions + exon array
-        if let Some(exon_coords) = extract_exon_coords_storable(object) {
+        // Primary: VEP's own method, Transcript::coding_region_start/end
+        // (Transcript.pm:1087-1154): translation start/end on the unedited
+        // translation.start_exon/end_exon. RefSeq cDNA indel edits do not move it.
+        let (derived_start, derived_end) =
+            derive_coding_region_from_translation_storable(object, strand);
+        coding_region_start_val = derived_start;
+        coding_region_end_val = derived_end;
+        // Fallback: map cdna_coding_start/end through the raw exon array, for a
+        // translation whose start_exon/end_exon did not survive storable alias
+        // eviction. This ignores RNA edits, so it is only a last resort. The
+        // translation path yields both halves or neither, so testing the start
+        // is enough.
+        if coding_region_start_val.is_none()
+            && let Some(exon_coords) = extract_exon_coords_storable(object)
+        {
             let (derived_start, derived_end) = derive_coding_region(
                 &exon_coords,
                 strand,
                 cdna_coding_start_val,
                 cdna_coding_end_val,
-                source_start,
-                source_end,
-            );
-            coding_region_start_val = derived_start;
-            coding_region_end_val = derived_end;
-        }
-        // Fallback: derive from translation.start_exon/end_exon (VEP's own method).
-        // Works even when exon array is incomplete due to storable alias eviction.
-        if coding_region_start_val.is_none() {
-            let (derived_start, derived_end) = derive_coding_region_from_translation_storable(
-                object,
-                strand,
                 source_start,
                 source_end,
             );
@@ -2177,6 +2253,9 @@ fn append_transcript_storable_row_into(
     // Simple scalar VEP fields
     if let Some(idx) = col_idx.codon_table {
         batch.set_opt_i32(idx, storable_promoted_vef_i32(object, "codon_table"));
+    }
+    if let Some(idx) = col_idx.translation_seq_edits {
+        batch.set_seq_edit_list(idx, storable_translation_seq_edits(object).as_deref());
     }
     // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     if let Some(idx) = col_idx.tsl {
@@ -3776,5 +3855,600 @@ mod tests {
             json_first_string(object, &["_uniprot_isoform"]).as_deref(),
             Some("P05546-1")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #214: CDS bounds come from the translation, as Ensembl's
+    // Transcript::coding_region_start/end compute them (Transcript.pm:1087-1154):
+    //   + strand: start = start_Exon.start + tl.start - 1, end = end_Exon.start + tl.end - 1
+    //   - strand: start = end_Exon.end - (tl.end - 1),     end = start_Exon.end - (tl.start - 1)
+    // on the unedited exons, with no span check and no use of RNA edits.
+    // -----------------------------------------------------------------------
+
+    /// A two-exon transcript shape. `exons` are in transcript (5'→3') order.
+    /// `cdna_coding_*` are the *edited* cDNA positions a RefSeq cache stores
+    /// (a 1-bp 5'-UTR deletion edit and a 3-bp insertion edit before the stop),
+    /// so mapping them through the raw exons lands off VEP's bound.
+    struct CdsBoundsCase {
+        strand: i8,
+        tx_start: i64,
+        tx_end: i64,
+        exons: [(i64, i64); 2],
+        tl_start: i64,
+        tl_end: i64,
+        cdna_coding_start: i64,
+        cdna_coding_end: i64,
+        with_start_exon: bool,
+    }
+
+    /// Plus strand, exons [1000-1099, 2000-2199], translation 51..150.
+    /// VEP: cds_start = 1000 + 51 - 1 = 1050, cds_end = 2000 + 150 - 1 = 2149.
+    /// Raw-exon mapping of the edited cDNA (50, 252) gives 1049..2151.
+    fn plus_strand_case() -> CdsBoundsCase {
+        CdsBoundsCase {
+            strand: 1,
+            tx_start: 1000,
+            tx_end: 2199,
+            exons: [(1000, 1099), (2000, 2199)],
+            tl_start: 51,
+            tl_end: 150,
+            cdna_coding_start: 50,
+            cdna_coding_end: 252,
+            with_start_exon: true,
+        }
+    }
+
+    /// Minus-strand mirror: exons in transcript order [2000-2199, 1000-1099],
+    /// translation 51..50 (start_exon = 2000-2199, end_exon = 1000-1099).
+    /// VEP: cds_start = 1099 - (50 - 1) = 1050, cds_end = 2199 - (51 - 1) = 2149.
+    /// Raw-exon mapping of the edited cDNA (50, 252) gives 1048..2150.
+    fn minus_strand_case() -> CdsBoundsCase {
+        CdsBoundsCase {
+            strand: -1,
+            tx_start: 1000,
+            tx_end: 2199,
+            exons: [(2000, 2199), (1000, 1099)],
+            tl_start: 51,
+            tl_end: 50,
+            cdna_coding_start: 50,
+            cdna_coding_end: 252,
+            with_start_exon: true,
+        }
+    }
+
+    fn storable_exon(id: &str, start: i64, end: i64, strand: i8) -> SValue {
+        let mut exon = HashMap::new();
+        exon.insert("stable_id".to_string(), SValue::String(Arc::from(id)));
+        exon.insert("start".to_string(), SValue::Int(start));
+        exon.insert("end".to_string(), SValue::Int(end));
+        exon.insert("strand".to_string(), SValue::Int(i64::from(strand)));
+        SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::Exon"),
+            value: Arc::new(SValue::Hash(Arc::new(exon))),
+        }
+    }
+
+    /// Runs one storable transcript through the reader and returns
+    /// `(cds_start, cds_end)`.
+    fn storable_cds_bounds(case: &CdsBoundsCase) -> (Option<i64>, Option<i64>) {
+        let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
+        let exons: Vec<SValue> = case
+            .exons
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| {
+                storable_exon(&format!("exon-NM_TEST.1-{}", i + 1), s, e, case.strand)
+            })
+            .collect();
+        let mut translation = HashMap::new();
+        translation.insert("start".to_string(), SValue::Int(case.tl_start));
+        translation.insert("end".to_string(), SValue::Int(case.tl_end));
+        if case.with_start_exon {
+            translation.insert("start_exon".to_string(), exons[0].clone());
+        }
+        translation.insert("end_exon".to_string(), exons[1].clone());
+
+        let mut object = HashMap::new();
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+        object.insert(
+            "cdna_coding_start".to_string(),
+            SValue::Int(case.cdna_coding_start),
+        );
+        object.insert(
+            "cdna_coding_end".to_string(),
+            SValue::Int(case.cdna_coding_end),
+        );
+        object.insert(
+            "_trans_exon_array".to_string(),
+            SValue::Array(Arc::new(exons.clone())),
+        );
+        object.insert(
+            "translation".to_string(),
+            SValue::Blessed {
+                class: Arc::from("Bio::EnsEMBL::Translation"),
+                value: Arc::new(SValue::Hash(Arc::new(translation))),
+            },
+        );
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "1".to_string(),
+            start: case.tx_start,
+            end: case.tx_end,
+            source_start: case.tx_start,
+            source_end: case.tx_end,
+            strand: case.strand,
+            stable_id: "NM_TEST.1".to_string(),
+        };
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        let batch = batch.finish().unwrap();
+        (
+            batch_i64_value(&batch, "cds_start"),
+            batch_i64_value(&batch, "cds_end"),
+        )
+    }
+
+    /// JSON-line mirror of [`storable_cds_bounds`].
+    fn json_cds_bounds(case: &CdsBoundsCase) -> (Option<i64>, Option<i64>) {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let exons: Vec<serde_json::Value> = case
+            .exons
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| {
+                json!({"__class": "Bio::EnsEMBL::Exon", "__value": {
+                    "stable_id": format!("exon-NM_TEST.1-{}", i + 1),
+                    "start": s, "end": e, "strand": case.strand
+                }})
+            })
+            .collect();
+        let mut translation = serde_json::Map::new();
+        translation.insert("start".to_string(), json!(case.tl_start));
+        translation.insert("end".to_string(), json!(case.tl_end));
+        if case.with_start_exon {
+            translation.insert("start_exon".to_string(), exons[0].clone());
+        }
+        translation.insert("end_exon".to_string(), exons[1].clone());
+        let payload = json!({
+            "stable_id": "NM_TEST.1",
+            "strand": case.strand,
+            "biotype": "protein_coding",
+            "cdna_coding_start": case.cdna_coding_start,
+            "cdna_coding_end": case.cdna_coding_end,
+            "_trans_exon_array": exons,
+            "translation": {"__class": "Bio::EnsEMBL::Translation", "__value": translation},
+        });
+        let line = format!(
+            "1\t{}\t{}\tJSON:{}",
+            case.tx_start,
+            case.tx_end,
+            serde_json::to_string(&payload).unwrap()
+        );
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        assert!(written);
+        let batch = batch.finish().unwrap();
+        (
+            batch_i64_value(&batch, "cds_start"),
+            batch_i64_value(&batch, "cds_end"),
+        )
+    }
+
+    #[test]
+    fn append_transcript_storable_row_coding_region_from_translation_plus_strand() {
+        assert_eq!(
+            storable_cds_bounds(&plus_strand_case()),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    #[test]
+    fn append_transcript_storable_row_coding_region_from_translation_minus_strand() {
+        assert_eq!(
+            storable_cds_bounds(&minus_strand_case()),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_coding_region_from_translation() {
+        assert_eq!(
+            json_cds_bounds(&plus_strand_case()),
+            (Some(1050), Some(2149))
+        );
+        assert_eq!(
+            json_cds_bounds(&minus_strand_case()),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    /// The NBPF1 shape: `cdna_coding_end` lies past the raw exon sum, so the
+    /// raw-exon path has nothing, and the translation-derived start lies below
+    /// the stored transcript start. Ensembl has no span check, so the bound is
+    /// kept rather than dropped.
+    fn out_of_span_case(strand: i8) -> CdsBoundsCase {
+        let mut case = if strand >= 0 {
+            plus_strand_case()
+        } else {
+            minus_strand_case()
+        };
+        case.tx_start = 1060;
+        case.cdna_coding_end = 10_000;
+        case
+    }
+
+    #[test]
+    fn append_transcript_storable_row_coding_region_out_of_span_bound_is_kept() {
+        assert_eq!(
+            storable_cds_bounds(&out_of_span_case(1)),
+            (Some(1050), Some(2149))
+        );
+        assert_eq!(
+            storable_cds_bounds(&out_of_span_case(-1)),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_coding_region_out_of_span_bound_is_kept() {
+        assert_eq!(
+            json_cds_bounds(&out_of_span_case(1)),
+            (Some(1050), Some(2149))
+        );
+        assert_eq!(
+            json_cds_bounds(&out_of_span_case(-1)),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    /// Without `translation.start_exon` (alias eviction) the translation method
+    /// has nothing to work from, so the raw-exon mapping is still used.
+    #[test]
+    fn append_transcript_storable_row_coding_region_falls_back_to_raw_exons_without_start_exon() {
+        let mut plus = plus_strand_case();
+        plus.with_start_exon = false;
+        assert_eq!(storable_cds_bounds(&plus), (Some(1049), Some(2151)));
+        assert_eq!(json_cds_bounds(&plus), (Some(1049), Some(2151)));
+
+        let mut minus = minus_strand_case();
+        minus.with_start_exon = false;
+        assert_eq!(storable_cds_bounds(&minus), (Some(1048), Some(2150)));
+        assert_eq!(json_cds_bounds(&minus), (Some(1048), Some(2150)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Translation SeqEdits (`translation_seq_edits`), read from
+    // `_variation_effect_feature_cache->{seq_edits}`: the only offline copy of
+    // the edits VEP applies to the reference peptide (TVA.pm:742-772).
+    // NULL = no VEFC or key absent; [] = key present and empty.
+    // -----------------------------------------------------------------------
+
+    type SeqEditRow = (String, i64, i64, String);
+
+    fn batch_seq_edits(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+    ) -> Option<Vec<SeqEditRow>> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name("translation_seq_edits")
+            .expect("missing translation_seq_edits column");
+        let list = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("expected ListArray for translation_seq_edits");
+        if list.is_null(0) {
+            return None;
+        }
+        let values = list.value(0);
+        let structs = values
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("expected StructArray items");
+        let code = structs
+            .column_by_name("code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let start = structs
+            .column_by_name("start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let end = structs
+            .column_by_name("end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let alt = structs
+            .column_by_name("alt_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        Some(
+            (0..structs.len())
+                .map(|i| {
+                    assert!(!alt.is_null(i), "alt_seq must never be null");
+                    (
+                        code.value(i).to_string(),
+                        start.value(i),
+                        end.value(i),
+                        alt.value(i).to_string(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// A blessed `Bio::EnsEMBL::SeqEdit` as the raw cache stores it: `start`
+    /// and `end` are Perl strings, `alt_seq` may be undef.
+    fn storable_seq_edit(code: &str, start: &str, end: &str, alt_seq: Option<&str>) -> SValue {
+        let mut edit = HashMap::new();
+        edit.insert("code".to_string(), SValue::String(Arc::from(code)));
+        edit.insert("name".to_string(), SValue::String(Arc::from(code)));
+        edit.insert("start".to_string(), SValue::String(Arc::from(start)));
+        edit.insert("end".to_string(), SValue::String(Arc::from(end)));
+        if let Some(alt_seq) = alt_seq {
+            edit.insert("alt_seq".to_string(), SValue::String(Arc::from(alt_seq)));
+        }
+        SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::SeqEdit"),
+            value: Arc::new(SValue::Hash(Arc::new(edit))),
+        }
+    }
+
+    enum VefcSeqEdits {
+        NoVefc,
+        KeyAbsent,
+        List(Vec<SValue>),
+    }
+
+    fn storable_seq_edits_with(
+        seq_edits: VefcSeqEdits,
+        components: (
+            BatchBuilder,
+            TranscriptColumnIndices,
+            ProvenanceWriter,
+            CacheInfo,
+        ),
+    ) -> Option<Vec<SeqEditRow>> {
+        let (mut batch, col_idx, provenance, _) = components;
+        let mut object = HashMap::new();
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+        match seq_edits {
+            VefcSeqEdits::NoVefc => {}
+            VefcSeqEdits::KeyAbsent => {
+                let mut vefc = HashMap::new();
+                vefc.insert("peptide".to_string(), SValue::String(Arc::from("MNPL")));
+                object.insert(
+                    "_variation_effect_feature_cache".to_string(),
+                    SValue::Hash(Arc::new(vefc)),
+                );
+            }
+            VefcSeqEdits::List(edits) => {
+                let mut vefc = HashMap::new();
+                vefc.insert("seq_edits".to_string(), SValue::Array(Arc::new(edits)));
+                object.insert(
+                    "_variation_effect_feature_cache".to_string(),
+                    SValue::Blessed {
+                        class: Arc::from("Bio::EnsEMBL::Variation::VariationEffectFeatureCache"),
+                        value: Arc::new(SValue::Hash(Arc::new(vefc))),
+                    },
+                );
+            }
+        }
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "MT".to_string(),
+            start: 4470,
+            end: 5511,
+            source_start: 4470,
+            source_end: 5511,
+            strand: 1,
+            stable_id: "ENST00000361453".to_string(),
+        };
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        batch_seq_edits(&batch.finish().unwrap())
+    }
+
+    fn storable_seq_edits(seq_edits: VefcSeqEdits) -> Option<Vec<SeqEditRow>> {
+        storable_seq_edits_with(seq_edits, transcript_test_components("storable"))
+    }
+
+    fn seq_edit_row(code: &str, start: i64, end: i64, alt: &str) -> SeqEditRow {
+        (code.to_string(), start, end, alt.to_string())
+    }
+
+    #[test]
+    fn append_transcript_storable_row_exports_translation_seq_edits() {
+        // Ensembl ND2 (ENST00000361453): `amino_acid_sub 1 1 M`, start/end as strings.
+        let got = storable_seq_edits(VefcSeqEdits::List(vec![storable_seq_edit(
+            "amino_acid_sub",
+            "1",
+            "1",
+            Some("M"),
+        )]));
+        assert_eq!(got, Some(vec![seq_edit_row("amino_acid_sub", 1, 1, "M")]));
+    }
+
+    #[test]
+    fn append_transcript_storable_row_seq_edits_keeps_empty_alt_seq() {
+        // MPZ NM_001315491.2: `amino_acid_sub 249 249 ""`; undef alt maps to ""
+        // too, as SeqEdit::new does (`$alt_seq ||= ''`, SeqEdit.pm:169).
+        let got = storable_seq_edits(VefcSeqEdits::List(vec![
+            storable_seq_edit("amino_acid_sub", "249", "249", Some("")),
+            storable_seq_edit("amino_acid_sub", "250", "250", None),
+        ]));
+        assert_eq!(
+            got,
+            Some(vec![
+                seq_edit_row("amino_acid_sub", 249, 249, ""),
+                seq_edit_row("amino_acid_sub", 250, 250, ""),
+            ])
+        );
+    }
+
+    #[test]
+    fn append_transcript_storable_row_seq_edits_empty_list_vs_null() {
+        assert_eq!(storable_seq_edits(VefcSeqEdits::List(vec![])), Some(vec![]));
+        assert_eq!(storable_seq_edits(VefcSeqEdits::KeyAbsent), None);
+        assert_eq!(storable_seq_edits(VefcSeqEdits::NoVefc), None);
+    }
+
+    #[test]
+    fn append_transcript_storable_row_seq_edits_preserves_source_order() {
+        let got = storable_seq_edits(VefcSeqEdits::List(vec![
+            storable_seq_edit("_selenocysteine", "300", "300", Some("U")),
+            storable_seq_edit("_selenocysteine", "12", "12", Some("U")),
+            storable_seq_edit("initial_met", "1", "1", Some("M")),
+        ]));
+        assert_eq!(
+            got,
+            Some(vec![
+                seq_edit_row("_selenocysteine", 300, 300, "U"),
+                seq_edit_row("_selenocysteine", 12, 12, "U"),
+                seq_edit_row("initial_met", 1, 1, "M"),
+            ])
+        );
+    }
+
+    #[test]
+    fn append_transcript_storable_row_seq_edits_skips_unparseable_entry() {
+        let got = storable_seq_edits(VefcSeqEdits::List(vec![
+            storable_seq_edit("amino_acid_sub", "x", "1", Some("M")),
+            storable_seq_edit("_stop_codon_rt", "249", "249", Some("X")),
+        ]));
+        assert_eq!(
+            got,
+            Some(vec![seq_edit_row("_stop_codon_rt", 249, 249, "X")])
+        );
+    }
+
+    fn json_seq_edits(vefc: Option<serde_json::Value>) -> Option<Vec<SeqEditRow>> {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let mut payload = json!({
+            "stable_id": "ENST00000361453",
+            "strand": 1,
+            "biotype": "protein_coding",
+        });
+        if let Some(vefc) = vefc {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("_variation_effect_feature_cache".to_string(), vefc);
+        }
+        let line = format!(
+            "MT\t4470\t5511\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        assert!(written);
+        batch_seq_edits(&batch.finish().unwrap())
+    }
+
+    #[test]
+    fn parse_transcript_line_exports_translation_seq_edits() {
+        let blessed = |code: &str, start: &str, end: &str, alt: serde_json::Value| {
+            json!({"__class": "Bio::EnsEMBL::SeqEdit", "__value": {
+                "code": code, "name": code, "start": start, "end": end, "alt_seq": alt
+            }})
+        };
+        assert_eq!(
+            json_seq_edits(Some(json!({"seq_edits": [
+                blessed("amino_acid_sub", "1", "1", json!("M")),
+                blessed("amino_acid_sub", "249", "249", json!("")),
+                blessed("amino_acid_sub", "250", "250", serde_json::Value::Null),
+            ]}))),
+            Some(vec![
+                seq_edit_row("amino_acid_sub", 1, 1, "M"),
+                seq_edit_row("amino_acid_sub", 249, 249, ""),
+                seq_edit_row("amino_acid_sub", 250, 250, ""),
+            ])
+        );
+        assert_eq!(json_seq_edits(Some(json!({"seq_edits": []}))), Some(vec![]));
+        assert_eq!(json_seq_edits(Some(json!({"peptide": "MNPL"}))), None);
+        assert_eq!(json_seq_edits(None), None);
+    }
+
+    /// Projecting only `stable_id` and the new column must still fill it: the
+    /// VEFC sequence block is gated on other columns being projected.
+    #[test]
+    fn translation_seq_edits_parsed_when_only_column_projected() {
+        let cache_info = test_cache_info("storable");
+        let full = transcript_schema(
+            &cache_info,
+            false,
+            crate::source_type::CacheSourceType::Ensembl,
+        );
+        let indices = ["stable_id", "translation_seq_edits"]
+            .iter()
+            .map(|name| full.index_of(name).unwrap())
+            .collect::<Vec<_>>();
+        let schema = Arc::new(full.project(&indices).unwrap());
+        let col_map = ColumnMap::from_schema(&schema);
+        let components = (
+            BatchBuilder::new(schema, 1).unwrap(),
+            TranscriptColumnIndices::new(&col_map),
+            ProvenanceWriter::new(&col_map, &cache_info),
+            cache_info,
+        );
+        let got = storable_seq_edits_with(
+            VefcSeqEdits::List(vec![storable_seq_edit(
+                "amino_acid_sub",
+                "1",
+                "1",
+                Some("M"),
+            )]),
+            components,
+        );
+        assert_eq!(got, Some(vec![seq_edit_row("amino_acid_sub", 1, 1, "M")]));
     }
 }

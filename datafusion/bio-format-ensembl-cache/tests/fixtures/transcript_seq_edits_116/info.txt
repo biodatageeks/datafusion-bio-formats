@@ -1,0 +1,7 @@
+species	homo_sapiens
+assembly	GRCh38
+cache_version	116
+source_assembly	GRCh38.p14
+source_refseq	GCF_000001405.40-RS_2025_08 - GCF_000001405.40_GRCh38.p14_genomic.gff
+serialiser_type	storable
+cache_region_size	1000000

@@ -1251,3 +1251,233 @@ async fn transcript_schema_has_gene_hgnc_id_native() -> datafusion::common::Resu
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// #214: CDS bounds on RefSeq transcripts with cDNA indel `_rna_edit`s.
+//
+// Fixture `transcript_refseq_edit_bounds_116` holds only the named transcripts,
+// copied with Perl `nstore` out of the raw VEP 116 merged cache region files.
+// Expected values are Ensembl's `Transcript::coding_region_start/end`
+// (Transcript.pm:1087-1154) evaluated in Perl on those same objects, not the
+// reader's output.
+// ---------------------------------------------------------------------------
+
+const REFSEQ_EDIT_BOUNDS_FIXTURE: &str = "transcript_refseq_edit_bounds_116";
+
+#[tokio::test]
+async fn real_refseq_edit_bounds_match_ensembl() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(
+        EnsemblCacheOptions::new(fixture_path(REFSEQ_EDIT_BOUNDS_FIXTURE))
+            .with_cache_source_type(CacheSourceType::Merged),
+    )?;
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+    let batches = ctx
+        .sql("SELECT stable_id, cds_start, cds_end FROM tx ORDER BY stable_id")
+        .await?
+        .collect()
+        .await?;
+
+    let mut got = Vec::new();
+    for batch in &batches {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let starts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let ends = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            got.push((
+                ids.value(i).to_string(),
+                (!starts.is_null(i)).then(|| starts.value(i)),
+                (!ends.is_null(i)).then(|| ends.value(i)),
+            ));
+        }
+    }
+
+    let expected = [
+        ("NM_001304718.2", 87_952_217, 87_965_472), // PTEN, 1-bp 5'-UTR deletion edit
+        ("NM_001405666.3", 16_563_943, 16_592_021), // NBPF1, already right: control
+        ("NM_001405667.2", 16_563_943, 16_592_021), // NBPF1, start was 1002 bp upstream
+        ("NM_002111.8", 3_074_826, 3_240_059),      // HTT, end was +6
+        ("NM_002537.3", 64_688_704, 64_703_048),    // OAZ2, minus strand, BAM failed
+        ("NM_015120.4", 73_385_869, 73_609_612),    // ALMS1, end was +3
+    ];
+    let expected: Vec<(String, Option<i64>, Option<i64>)> = expected
+        .iter()
+        .map(|&(id, s, e)| (id.to_string(), Some(s), Some(e)))
+        .collect();
+    assert_eq!(got, expected);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Translation SeqEdits (`translation_seq_edits`).
+//
+// Fixture `transcript_seq_edits_116`: the raw VEP 116 merged `MT/1-1000000.gz`
+// (unmodified copy) plus MPZ ENST00000672602 / NM_001315491.2 copied with Perl
+// `nstore` out of `1/161000001-162000000.gz`.
+// ---------------------------------------------------------------------------
+
+const SEQ_EDITS_FIXTURE: &str = "transcript_seq_edits_116";
+
+type SeqEditRow = (String, i64, i64, String);
+
+/// `(stable_id, is_translated, translation_seq_edits)` for every row.
+async fn collect_seq_edits(
+    provider: TranscriptTableProvider,
+) -> datafusion::common::Result<Vec<(String, bool, Option<Vec<SeqEditRow>>)>> {
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+    let batches = ctx
+        .sql(
+            "SELECT stable_id, translation_stable_id IS NOT NULL, translation_seq_edits \
+             FROM tx ORDER BY stable_id",
+        )
+        .await?
+        .collect()
+        .await?;
+    let mut out = Vec::new();
+    for batch in &batches {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let translated = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+            .unwrap();
+        let lists = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            let edits = (!lists.is_null(i)).then(|| {
+                let values = lists.value(i);
+                let s = values.as_any().downcast_ref::<StructArray>().unwrap();
+                let code = s
+                    .column_by_name("code")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let start = s
+                    .column_by_name("start")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let end = s
+                    .column_by_name("end")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let alt = s
+                    .column_by_name("alt_seq")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                (0..s.len())
+                    .map(|j| {
+                        (
+                            code.value(j).to_string(),
+                            start.value(j),
+                            end.value(j),
+                            alt.value(j).to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            out.push((ids.value(i).to_string(), translated.value(i), edits));
+        }
+    }
+    Ok(out)
+}
+
+fn edits_for<'a>(
+    rows: &'a [(String, bool, Option<Vec<SeqEditRow>>)],
+    id: &str,
+) -> &'a Option<Vec<SeqEditRow>> {
+    &rows
+        .iter()
+        .find(|(sid, _, _)| sid == id)
+        .unwrap_or_else(|| panic!("missing transcript {id}"))
+        .2
+}
+
+fn edit(code: &str, start: i64, end: i64, alt: &str) -> SeqEditRow {
+    (code.to_string(), start, end, alt.to_string())
+}
+
+#[tokio::test]
+async fn real_mt_seq_edits_ensembl_vs_refseq_nd2() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(
+        EnsemblCacheOptions::new(fixture_path(SEQ_EDITS_FIXTURE))
+            .with_cache_source_type(CacheSourceType::Merged),
+    )?;
+    let rows = collect_seq_edits(provider).await?;
+
+    // Ensembl ND2 carries the MT initiator edit; RefSeq ND2 has the key with
+    // an empty list. Same peptide, same ATT start: only this column tells them apart.
+    assert_eq!(
+        edits_for(&rows, "ENST00000361453"),
+        &Some(vec![edit("amino_acid_sub", 1, 1, "M")])
+    );
+    assert_eq!(edits_for(&rows, "ND2"), &Some(vec![]));
+
+    // MPZ: Ensembl models stop read-through as `_stop_codon_rt X`, RefSeq as an
+    // `amino_acid_sub` with an empty alt, which must stay "" and not become NULL.
+    assert_eq!(
+        edits_for(&rows, "ENST00000672602"),
+        &Some(vec![edit("_stop_codon_rt", 249, 249, "X")])
+    );
+    assert_eq!(
+        edits_for(&rows, "NM_001315491.2"),
+        &Some(vec![edit("amino_acid_sub", 249, 249, "")])
+    );
+
+    // Every translated transcript has the key (a list); every untranslated one NULL.
+    for (id, translated, edits) in &rows {
+        assert_eq!(
+            edits.is_some(),
+            *translated,
+            "{id}: translated={translated} but translation_seq_edits={edits:?}"
+        );
+    }
+    let mt_ensembl_with_edit = rows
+        .iter()
+        .filter(|(id, _, e)| id.starts_with("ENST") && e.as_ref().is_some_and(|v| !v.is_empty()))
+        .count();
+    // 13 Ensembl MT protein-coding transcripts, each with `amino_acid_sub 1 1 M`,
+    // plus MPZ ENST00000672602.
+    assert_eq!(mt_ensembl_with_edit, 14);
+    Ok(())
+}
+
+#[tokio::test]
+async fn real_chr22_translated_transcripts_have_empty_seq_edits() -> datafusion::common::Result<()>
+{
+    let provider = TranscriptTableProvider::new(ensembl_options(fixture_path(REAL_FIXTURE)))?;
+    let rows = collect_seq_edits(provider).await?;
+    let translated: Vec<_> = rows.iter().filter(|(_, t, _)| *t).collect();
+    let untranslated: Vec<_> = rows.iter().filter(|(_, t, _)| !*t).collect();
+    assert_eq!(translated.len(), 3);
+    assert_eq!(untranslated.len(), 167);
+    assert!(translated.iter().all(|(_, _, e)| e == &Some(vec![])));
+    assert!(untranslated.iter().all(|(_, _, e)| e.is_none()));
+    Ok(())
+}
