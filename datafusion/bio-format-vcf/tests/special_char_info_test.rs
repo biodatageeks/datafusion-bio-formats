@@ -1,3 +1,4 @@
+use datafusion::arrow::array::{ListArray, StringArray};
 use datafusion::prelude::*;
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
@@ -8,6 +9,13 @@ const SAMPLE_VCF_CONTENT_WITH_SPECIAL_INFO: &str = r#"##fileformat=VCFv4.3
 ##INFO=<ID=HGMD-PUBLIC_20204,Number=0,Type=Flag,Description="Variants from HGMD-PUBLIC dataset December 2020">
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
 chr1	100	rs1	A	T	60	PASS	HGMD-PUBLIC_20204
+"#;
+
+const SAMPLE_VCF_CONTENT_WITH_CHARACTER_INFO: &str = r#"##fileformat=VCFv4.5
+##INFO=<ID=XCHR,Number=1,Type=Character,Description="Single character">
+##INFO=<ID=XCHARS,Number=2,Type=Character,Description="Two characters">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	100	rs1	A	T	60	PASS	XCHR=%3B;XCHARS=A,B
 "#;
 
 async fn create_test_vcf_file_with_special_info() -> std::io::Result<(tempfile::TempDir, String)> {
@@ -67,6 +75,58 @@ async fn test_special_info_fields() -> Result<(), Box<dyn std::error::Error>> {
 
         assert!(hgmd_array.value(0));
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn vcf_materializes_scalar_and_array_character_info() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp_dir = tempfile::tempdir()?;
+    let file_path = temp_dir.path().join("character_info.vcf");
+    fs::write(&file_path, SAMPLE_VCF_CONTENT_WITH_CHARACTER_INFO).await?;
+
+    let table = VcfTableProvider::new(
+        file_path.to_string_lossy().into_owned(),
+        Some(vec!["XCHR".to_string(), "XCHARS".to_string()]),
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(table))?;
+    let batches = context
+        .sql("SELECT \"XCHR\", \"XCHARS\" FROM variants")
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    assert_eq!(batch.num_rows(), 1);
+
+    let scalar = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("Character INFO scalar should use Arrow UTF-8");
+    assert_eq!(scalar.value(0), ";");
+
+    let characters = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("Character INFO array should use a list of Arrow UTF-8");
+    let values = characters.value(0);
+    let values = values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("Character INFO array values should use Arrow UTF-8");
+    assert_eq!(
+        values.iter().collect::<Vec<_>>(),
+        vec![Some("A"), Some("B")]
+    );
 
     Ok(())
 }
