@@ -413,17 +413,20 @@ fn derive_coding_region(
 }
 
 /// Derives `(coding_region_start, coding_region_end)` from the Translation
-/// sub-object's `start_exon`/`end_exon` references.  This is VEP's own method
-/// (`Translation::genomic_start`/`genomic_end`) and works even when the
-/// transcript's exon array is incomplete due to storable alias eviction.
+/// sub-object's `start`/`end` and `start_exon`/`end_exon` references.  This is
+/// Ensembl's own method, `Transcript::coding_region_start/end`
+/// (Transcript.pm:1087-1154), which VEP evaluates lazily because the cache
+/// stores both as undef.  It reads the unedited exons and ignores RNA edits,
+/// and it works even when the transcript's exon array is incomplete due to
+/// storable alias eviction.
 ///
-/// For + strand: `cds_start = start_exon.start + tl.start - 1`
-/// For − strand: `cds_start = start_exon.end - tl.start + 1`
+/// For + strand: `start = start_exon.start + tl.start - 1`,
+///               `end   = end_exon.start + tl.end - 1`
+/// For − strand: `start = end_exon.end - (tl.end - 1)`,
+///               `end   = start_exon.end - (tl.start - 1)`
 fn derive_coding_region_from_translation_json(
     object: &serde_json::Map<String, Value>,
     strand: i8,
-    tx_start: i64,
-    tx_end: i64,
 ) -> (Option<i64>, Option<i64>) {
     let tl = object
         .get("translation")
@@ -438,23 +441,14 @@ fn derive_coding_region_from_translation_json(
         .get("start_exon")
         .and_then(unwrap_blessed_object_optional);
     let ee = tl.get("end_exon").and_then(unwrap_blessed_object_optional);
-    compute_cds_from_translation_exons(
-        tl_start,
-        tl_end,
-        se,
-        ee,
-        strand,
-        tx_start,
-        tx_end,
-        |obj, key| json_i64(obj.get(key)),
-    )
+    compute_cds_from_translation_exons(tl_start, tl_end, se, ee, strand, |obj, key| {
+        json_i64(obj.get(key))
+    })
 }
 
 fn derive_coding_region_from_translation_storable(
     object: &std::collections::HashMap<String, SValue>,
     strand: i8,
-    tx_start: i64,
-    tx_end: i64,
 ) -> (Option<i64>, Option<i64>) {
     let tl = object.get("translation").and_then(SValue::as_hash);
     let tl = match tl {
@@ -465,27 +459,28 @@ fn derive_coding_region_from_translation_storable(
     let tl_end = sv_i64(tl.get("end"));
     let se = tl.get("start_exon").and_then(SValue::as_hash);
     let ee = tl.get("end_exon").and_then(SValue::as_hash);
-    compute_cds_from_translation_exons(
-        tl_start,
-        tl_end,
-        se,
-        ee,
-        strand,
-        tx_start,
-        tx_end,
-        |obj, key| sv_i64(obj.get(key)),
-    )
+    compute_cds_from_translation_exons(tl_start, tl_end, se, ee, strand, |obj, key| {
+        sv_i64(obj.get(key))
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Ensembl's `coding_region_start/end` arithmetic.  There is deliberately no
+/// check against the transcript span: Ensembl has none, so a bound outside it
+/// is VEP's bound and is kept.
+///
+/// The `min`/`max` at the end is not in Ensembl, which returns the pair as
+/// computed.  On well-formed data (every translated transcript of the pinned
+/// caches) start <= end already, so it is a no-op; on malformed data it keeps
+/// the pair ordered rather than crossing the bounds.
+///
+/// Returns `(Some, Some)` or `(None, None)`, never a mix, so callers may test
+/// either half for the fallback.
 fn compute_cds_from_translation_exons<T>(
     tl_start: Option<i64>,
     tl_end: Option<i64>,
     start_exon: Option<&T>,
     end_exon: Option<&T>,
     strand: i8,
-    tx_start: i64,
-    tx_end: i64,
     get_i64: impl Fn(&T, &str) -> Option<i64>,
 ) -> (Option<i64>, Option<i64>) {
     let (Some(tl_s), Some(tl_e)) = (tl_start, tl_end) else {
@@ -515,13 +510,10 @@ fn compute_cds_from_translation_exons<T>(
         };
         (ee_end - tl_e + 1, se_end - tl_s + 1)
     };
-    let cr_start = genomic_start.min(genomic_end);
-    let cr_end = genomic_start.max(genomic_end);
-    if cr_start >= tx_start && cr_end <= tx_end {
-        (Some(cr_start), Some(cr_end))
-    } else {
-        (None, None)
-    }
+    (
+        Some(genomic_start.min(genomic_end)),
+        Some(genomic_start.max(genomic_end)),
+    )
 }
 
 fn non_dash_string(value: Option<String>) -> Option<String> {
@@ -1458,8 +1450,8 @@ pub(crate) fn parse_transcript_line_into(
         let value = json_source_cache(object);
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
-    // coding_region_start/end: read from object first; if null, derive from
-    // cdna_coding_start/end + exon array (same derivation as storable path).
+    // coding_region_start/end: read from the object first. VEP caches store
+    // both as undef, so derive them as Ensembl does (see below).
     let cdna_coding_start_val = json_i64(object.get("cdna_coding_start"));
     let cdna_coding_end_val = json_i64(object.get("cdna_coding_end"));
 
@@ -1470,25 +1462,26 @@ pub(crate) fn parse_transcript_line_into(
         && coding_region_start_val.is_none()
         && coding_region_end_val.is_none()
     {
-        // Primary: derive from cdna positions + exon array
-        if let Some(exon_coords) = extract_exon_coords_json(object) {
+        // Primary: VEP's own method, Transcript::coding_region_start/end
+        // (Transcript.pm:1087-1154): translation start/end on the unedited
+        // translation.start_exon/end_exon. RefSeq cDNA indel edits do not move it.
+        let (derived_start, derived_end) =
+            derive_coding_region_from_translation_json(object, strand);
+        coding_region_start_val = derived_start;
+        coding_region_end_val = derived_end;
+        // Fallback: map cdna_coding_start/end through the raw exon array, for a
+        // translation whose start_exon/end_exon did not survive storable alias
+        // eviction. This ignores RNA edits, so it is only a last resort. The
+        // translation path yields both halves or neither, so testing the start
+        // is enough.
+        if coding_region_start_val.is_none()
+            && let Some(exon_coords) = extract_exon_coords_json(object)
+        {
             let (derived_start, derived_end) = derive_coding_region(
                 &exon_coords,
                 strand,
                 cdna_coding_start_val,
                 cdna_coding_end_val,
-                source_start,
-                source_end,
-            );
-            coding_region_start_val = derived_start;
-            coding_region_end_val = derived_end;
-        }
-        // Fallback: derive from translation.start_exon/end_exon (VEP's own method).
-        // Works even when exon array is incomplete due to storable alias eviction.
-        if coding_region_start_val.is_none() {
-            let (derived_start, derived_end) = derive_coding_region_from_translation_json(
-                object,
-                strand,
                 source_start,
                 source_end,
             );
@@ -2017,8 +2010,8 @@ fn append_transcript_storable_row_into(
         let value = storable_source_cache(object);
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
-    // coding_region_start/end: read from object first; if undef (common in
-    // storable binary), derive from cdna_coding_start/end + exon array.
+    // coding_region_start/end: read from the object first. VEP caches store
+    // both as undef, so derive them as Ensembl does (see below).
     let cdna_coding_start_val = sv_i64(object.get("cdna_coding_start"));
     let cdna_coding_end_val = sv_i64(object.get("cdna_coding_end"));
 
@@ -2029,25 +2022,26 @@ fn append_transcript_storable_row_into(
         && coding_region_start_val.is_none()
         && coding_region_end_val.is_none()
     {
-        // Primary: derive from cdna positions + exon array
-        if let Some(exon_coords) = extract_exon_coords_storable(object) {
+        // Primary: VEP's own method, Transcript::coding_region_start/end
+        // (Transcript.pm:1087-1154): translation start/end on the unedited
+        // translation.start_exon/end_exon. RefSeq cDNA indel edits do not move it.
+        let (derived_start, derived_end) =
+            derive_coding_region_from_translation_storable(object, strand);
+        coding_region_start_val = derived_start;
+        coding_region_end_val = derived_end;
+        // Fallback: map cdna_coding_start/end through the raw exon array, for a
+        // translation whose start_exon/end_exon did not survive storable alias
+        // eviction. This ignores RNA edits, so it is only a last resort. The
+        // translation path yields both halves or neither, so testing the start
+        // is enough.
+        if coding_region_start_val.is_none()
+            && let Some(exon_coords) = extract_exon_coords_storable(object)
+        {
             let (derived_start, derived_end) = derive_coding_region(
                 &exon_coords,
                 strand,
                 cdna_coding_start_val,
                 cdna_coding_end_val,
-                source_start,
-                source_end,
-            );
-            coding_region_start_val = derived_start;
-            coding_region_end_val = derived_end;
-        }
-        // Fallback: derive from translation.start_exon/end_exon (VEP's own method).
-        // Works even when exon array is incomplete due to storable alias eviction.
-        if coding_region_start_val.is_none() {
-            let (derived_start, derived_end) = derive_coding_region_from_translation_storable(
-                object,
-                strand,
                 source_start,
                 source_end,
             );
@@ -3776,5 +3770,285 @@ mod tests {
             json_first_string(object, &["_uniprot_isoform"]).as_deref(),
             Some("P05546-1")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #214: CDS bounds come from the translation, as Ensembl's
+    // Transcript::coding_region_start/end compute them (Transcript.pm:1087-1154):
+    //   + strand: start = start_Exon.start + tl.start - 1, end = end_Exon.start + tl.end - 1
+    //   - strand: start = end_Exon.end - (tl.end - 1),     end = start_Exon.end - (tl.start - 1)
+    // on the unedited exons, with no span check and no use of RNA edits.
+    // -----------------------------------------------------------------------
+
+    /// A two-exon transcript shape. `exons` are in transcript (5'→3') order.
+    /// `cdna_coding_*` are the *edited* cDNA positions a RefSeq cache stores
+    /// (a 1-bp 5'-UTR deletion edit and a 3-bp insertion edit before the stop),
+    /// so mapping them through the raw exons lands off VEP's bound.
+    struct CdsBoundsCase {
+        strand: i8,
+        tx_start: i64,
+        tx_end: i64,
+        exons: [(i64, i64); 2],
+        tl_start: i64,
+        tl_end: i64,
+        cdna_coding_start: i64,
+        cdna_coding_end: i64,
+        with_start_exon: bool,
+    }
+
+    /// Plus strand, exons [1000-1099, 2000-2199], translation 51..150.
+    /// VEP: cds_start = 1000 + 51 - 1 = 1050, cds_end = 2000 + 150 - 1 = 2149.
+    /// Raw-exon mapping of the edited cDNA (50, 252) gives 1049..2151.
+    fn plus_strand_case() -> CdsBoundsCase {
+        CdsBoundsCase {
+            strand: 1,
+            tx_start: 1000,
+            tx_end: 2199,
+            exons: [(1000, 1099), (2000, 2199)],
+            tl_start: 51,
+            tl_end: 150,
+            cdna_coding_start: 50,
+            cdna_coding_end: 252,
+            with_start_exon: true,
+        }
+    }
+
+    /// Minus-strand mirror: exons in transcript order [2000-2199, 1000-1099],
+    /// translation 51..50 (start_exon = 2000-2199, end_exon = 1000-1099).
+    /// VEP: cds_start = 1099 - (50 - 1) = 1050, cds_end = 2199 - (51 - 1) = 2149.
+    /// Raw-exon mapping of the edited cDNA (50, 252) gives 1048..2150.
+    fn minus_strand_case() -> CdsBoundsCase {
+        CdsBoundsCase {
+            strand: -1,
+            tx_start: 1000,
+            tx_end: 2199,
+            exons: [(2000, 2199), (1000, 1099)],
+            tl_start: 51,
+            tl_end: 50,
+            cdna_coding_start: 50,
+            cdna_coding_end: 252,
+            with_start_exon: true,
+        }
+    }
+
+    fn storable_exon(id: &str, start: i64, end: i64, strand: i8) -> SValue {
+        let mut exon = HashMap::new();
+        exon.insert("stable_id".to_string(), SValue::String(Arc::from(id)));
+        exon.insert("start".to_string(), SValue::Int(start));
+        exon.insert("end".to_string(), SValue::Int(end));
+        exon.insert("strand".to_string(), SValue::Int(i64::from(strand)));
+        SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::Exon"),
+            value: Arc::new(SValue::Hash(Arc::new(exon))),
+        }
+    }
+
+    /// Runs one storable transcript through the reader and returns
+    /// `(cds_start, cds_end)`.
+    fn storable_cds_bounds(case: &CdsBoundsCase) -> (Option<i64>, Option<i64>) {
+        let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
+        let exons: Vec<SValue> = case
+            .exons
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| {
+                storable_exon(&format!("exon-NM_TEST.1-{}", i + 1), s, e, case.strand)
+            })
+            .collect();
+        let mut translation = HashMap::new();
+        translation.insert("start".to_string(), SValue::Int(case.tl_start));
+        translation.insert("end".to_string(), SValue::Int(case.tl_end));
+        if case.with_start_exon {
+            translation.insert("start_exon".to_string(), exons[0].clone());
+        }
+        translation.insert("end_exon".to_string(), exons[1].clone());
+
+        let mut object = HashMap::new();
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+        object.insert(
+            "cdna_coding_start".to_string(),
+            SValue::Int(case.cdna_coding_start),
+        );
+        object.insert(
+            "cdna_coding_end".to_string(),
+            SValue::Int(case.cdna_coding_end),
+        );
+        object.insert(
+            "_trans_exon_array".to_string(),
+            SValue::Array(Arc::new(exons.clone())),
+        );
+        object.insert(
+            "translation".to_string(),
+            SValue::Blessed {
+                class: Arc::from("Bio::EnsEMBL::Translation"),
+                value: Arc::new(SValue::Hash(Arc::new(translation))),
+            },
+        );
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "1".to_string(),
+            start: case.tx_start,
+            end: case.tx_end,
+            source_start: case.tx_start,
+            source_end: case.tx_end,
+            strand: case.strand,
+            stable_id: "NM_TEST.1".to_string(),
+        };
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        let batch = batch.finish().unwrap();
+        (
+            batch_i64_value(&batch, "cds_start"),
+            batch_i64_value(&batch, "cds_end"),
+        )
+    }
+
+    /// JSON-line mirror of [`storable_cds_bounds`].
+    fn json_cds_bounds(case: &CdsBoundsCase) -> (Option<i64>, Option<i64>) {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let exons: Vec<serde_json::Value> = case
+            .exons
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| {
+                json!({"__class": "Bio::EnsEMBL::Exon", "__value": {
+                    "stable_id": format!("exon-NM_TEST.1-{}", i + 1),
+                    "start": s, "end": e, "strand": case.strand
+                }})
+            })
+            .collect();
+        let mut translation = serde_json::Map::new();
+        translation.insert("start".to_string(), json!(case.tl_start));
+        translation.insert("end".to_string(), json!(case.tl_end));
+        if case.with_start_exon {
+            translation.insert("start_exon".to_string(), exons[0].clone());
+        }
+        translation.insert("end_exon".to_string(), exons[1].clone());
+        let payload = json!({
+            "stable_id": "NM_TEST.1",
+            "strand": case.strand,
+            "biotype": "protein_coding",
+            "cdna_coding_start": case.cdna_coding_start,
+            "cdna_coding_end": case.cdna_coding_end,
+            "_trans_exon_array": exons,
+            "translation": {"__class": "Bio::EnsEMBL::Translation", "__value": translation},
+        });
+        let line = format!(
+            "1\t{}\t{}\tJSON:{}",
+            case.tx_start,
+            case.tx_end,
+            serde_json::to_string(&payload).unwrap()
+        );
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        assert!(written);
+        let batch = batch.finish().unwrap();
+        (
+            batch_i64_value(&batch, "cds_start"),
+            batch_i64_value(&batch, "cds_end"),
+        )
+    }
+
+    #[test]
+    fn append_transcript_storable_row_coding_region_from_translation_plus_strand() {
+        assert_eq!(
+            storable_cds_bounds(&plus_strand_case()),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    #[test]
+    fn append_transcript_storable_row_coding_region_from_translation_minus_strand() {
+        assert_eq!(
+            storable_cds_bounds(&minus_strand_case()),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_coding_region_from_translation() {
+        assert_eq!(
+            json_cds_bounds(&plus_strand_case()),
+            (Some(1050), Some(2149))
+        );
+        assert_eq!(
+            json_cds_bounds(&minus_strand_case()),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    /// The NBPF1 shape: `cdna_coding_end` lies past the raw exon sum, so the
+    /// raw-exon path has nothing, and the translation-derived start lies below
+    /// the stored transcript start. Ensembl has no span check, so the bound is
+    /// kept rather than dropped.
+    fn out_of_span_case(strand: i8) -> CdsBoundsCase {
+        let mut case = if strand >= 0 {
+            plus_strand_case()
+        } else {
+            minus_strand_case()
+        };
+        case.tx_start = 1060;
+        case.cdna_coding_end = 10_000;
+        case
+    }
+
+    #[test]
+    fn append_transcript_storable_row_coding_region_out_of_span_bound_is_kept() {
+        assert_eq!(
+            storable_cds_bounds(&out_of_span_case(1)),
+            (Some(1050), Some(2149))
+        );
+        assert_eq!(
+            storable_cds_bounds(&out_of_span_case(-1)),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_coding_region_out_of_span_bound_is_kept() {
+        assert_eq!(
+            json_cds_bounds(&out_of_span_case(1)),
+            (Some(1050), Some(2149))
+        );
+        assert_eq!(
+            json_cds_bounds(&out_of_span_case(-1)),
+            (Some(1050), Some(2149))
+        );
+    }
+
+    /// Without `translation.start_exon` (alias eviction) the translation method
+    /// has nothing to work from, so the raw-exon mapping is still used.
+    #[test]
+    fn append_transcript_storable_row_coding_region_falls_back_to_raw_exons_without_start_exon() {
+        let mut plus = plus_strand_case();
+        plus.with_start_exon = false;
+        assert_eq!(storable_cds_bounds(&plus), (Some(1049), Some(2151)));
+        assert_eq!(json_cds_bounds(&plus), (Some(1049), Some(2151)));
+
+        let mut minus = minus_strand_case();
+        minus.with_start_exon = false;
+        assert_eq!(storable_cds_bounds(&minus), (Some(1048), Some(2150)));
+        assert_eq!(json_cds_bounds(&minus), (Some(1048), Some(2150)));
     }
 }
