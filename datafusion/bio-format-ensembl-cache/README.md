@@ -96,6 +96,8 @@ of transcripts that would otherwise have no exon entries.
 | `source` | Utf8 | yes | Source database |
 | `is_canonical` | Boolean | yes | Whether this is the canonical transcript |
 | `gene_stable_id` | Utf8 | yes | Parent gene ID (ENSG...) |
+| `gene_start` | Int64 | yes | Parent gene's 1-based inclusive start; null with `gene_end` if either raw bound is unavailable |
+| `gene_end` | Int64 | yes | Parent gene's 1-based inclusive end; null with `gene_start` if either raw bound is unavailable |
 | `gene_symbol` | Utf8 | yes | Gene symbol (e.g. BRCA1) |
 | `gene_symbol_source` | Utf8 | yes | Gene symbol source (e.g. HGNC) |
 | `gene_hgnc_id` | Utf8 | yes | HGNC ID parsed from the raw VEP object, with no export-time propagation/backfill |
@@ -138,6 +140,12 @@ of transcripts that would otherwise have no exon entries.
 | `has_non_polya_rna_edit` | Boolean | yes | Whether transcript has non-poly-A RNA edits |
 | `spliced_seq` | Utf8 | yes | Spliced transcript sequence |
 | `flags_str` | Utf8 | yes | CDS NF flags in VEP encounter order (e.g. `cds_start_NF&cds_end_NF`) |
+
+**Coordinate contract:** transcript `start` and `end` follow the configured
+`coordinate_system_zero_based` option. `gene_start` and `gene_end` always remain
+1-based inclusive, regardless of that option, because they represent the raw
+Ensembl gene bounds used for VEP cache-region membership. Each field carries
+`bio.vep.gene_bounds_coordinate_system=1-based-inclusive` metadata.
 
 ### Exon
 
@@ -306,7 +314,8 @@ All entity schemas also include **provenance columns**: `species`, `assembly`, `
 ## Projection Pushdown
 
 Transcript, exon, and translation schemas support projection pushdown. When VEP-related
-columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `mature_mirna_regions`,
+columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `gene_start`, `gene_end`,
+`mature_mirna_regions`,
 `cdna_mapper_segments`, `spliced_seq`, `translation_seq`, `cds_sequence`,
 `translation_seq_canonical`, `cds_sequence_canonical`,
 `display_xref_id`, `source_cache`, `refseq_match`, `refseq_edits`,

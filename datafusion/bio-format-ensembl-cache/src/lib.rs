@@ -37,3 +37,12 @@ pub use table_provider::{
     RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,
     VEP_CHROMOSOMES_METADATA_KEY, VariationTableProvider,
 };
+
+/// Arrow field metadata key describing the coordinate system used by
+/// `gene_start` and `gene_end` transcript fields.
+pub const GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_KEY: &str =
+    "bio.vep.gene_bounds_coordinate_system";
+
+/// Arrow field metadata value identifying `gene_start` and `gene_end` as
+/// 1-based inclusive coordinates.
+pub const GENE_BOUNDS_COORDINATE_SYSTEM_METADATA_VALUE: &str = "1-based-inclusive";

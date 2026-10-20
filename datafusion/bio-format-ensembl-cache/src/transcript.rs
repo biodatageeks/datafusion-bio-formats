@@ -34,6 +34,8 @@ pub(crate) struct TranscriptColumnIndices {
     source: Option<usize>,
     is_canonical: Option<usize>,
     gene_stable_id: Option<usize>,
+    gene_start: Option<usize>,
+    gene_end: Option<usize>,
     gene_symbol: Option<usize>,
     gene_symbol_source: Option<usize>,
     gene_hgnc_id: Option<usize>,
@@ -145,6 +147,8 @@ impl TranscriptColumnIndices {
             source: col_map.get("source"),
             is_canonical: col_map.get("is_canonical"),
             gene_stable_id: col_map.get("gene_stable_id"),
+            gene_start: col_map.get("gene_start"),
+            gene_end: col_map.get("gene_end"),
             gene_symbol: col_map.get("gene_symbol"),
             gene_symbol_source: col_map.get("gene_symbol_source"),
             gene_hgnc_id: col_map.get("gene_hgnc_id"),
@@ -1481,6 +1485,15 @@ pub(crate) fn parse_transcript_line_into(
             .as_ref(),
         );
     }
+    if col_idx.gene_start.is_some() || col_idx.gene_end.is_some() {
+        let bounds = gene_bounds_from_json_object(object);
+        if let Some(idx) = col_idx.gene_start {
+            batch.set_opt_i64(idx, bounds.map(|(start, _)| start));
+        }
+        if let Some(idx) = col_idx.gene_end {
+            batch.set_opt_i64(idx, bounds.map(|(_, end)| end));
+        }
+    }
     if let Some(idx) = col_idx.gene_symbol {
         batch.set_opt_utf8_owned(
             idx,
@@ -2050,6 +2063,15 @@ fn append_transcript_storable_row_into(
         );
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
+    if col_idx.gene_start.is_some() || col_idx.gene_end.is_some() {
+        let bounds = gene_bounds_from_storable_object(object);
+        if let Some(idx) = col_idx.gene_start {
+            batch.set_opt_i64(idx, bounds.map(|(start, _)| start));
+        }
+        if let Some(idx) = col_idx.gene_end {
+            batch.set_opt_i64(idx, bounds.map(|(_, end)| end));
+        }
+    }
     if let Some(idx) = col_idx.gene_symbol {
         let value = sv_str(
             object
@@ -2429,6 +2451,18 @@ fn unwrap_blessed_object(value: &Value) -> Result<&serde_json::Map<String, Value
 
 fn unwrap_blessed_object_optional(value: &Value) -> Option<&serde_json::Map<String, Value>> {
     unwrap_blessed_object(value).ok()
+}
+
+fn gene_bounds_from_json_object(object: &serde_json::Map<String, Value>) -> Option<(i64, i64)> {
+    let gene = object
+        .get("_gene")
+        .and_then(unwrap_blessed_object_optional)?;
+    Some((json_i64(gene.get("start"))?, json_i64(gene.get("end"))?))
+}
+
+fn gene_bounds_from_storable_object(object: &HashMap<String, SValue>) -> Option<(i64, i64)> {
+    let gene = object.get("_gene")?.as_hash()?;
+    Some((sv_i64(gene.get("start"))?, sv_i64(gene.get("end"))?))
 }
 
 fn sv_bool(value: Option<&SValue>) -> Option<bool> {
@@ -4135,6 +4169,160 @@ mod tests {
         minus.with_start_exon = false;
         assert_eq!(storable_cds_bounds(&minus), (Some(1048), Some(2150)));
         assert_eq!(json_cds_bounds(&minus), (Some(1048), Some(2150)));
+    }
+
+    fn batch_gene_bounds(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+    ) -> (Option<i64>, Option<i64>) {
+        (
+            batch_i64_value(batch, "gene_start"),
+            batch_i64_value(batch, "gene_end"),
+        )
+    }
+
+    fn storable_gene_bounds(
+        bounds: Option<(Option<i64>, Option<i64>)>,
+    ) -> (Option<i64>, Option<i64>) {
+        let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
+        let mut object = HashMap::new();
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+        if let Some((start, end)) = bounds {
+            let mut gene = HashMap::new();
+            if let Some(start) = start {
+                gene.insert("start".to_string(), SValue::Int(start));
+            }
+            if let Some(end) = end {
+                gene.insert("end".to_string(), SValue::Int(end));
+            }
+            object.insert(
+                "_gene".to_string(),
+                SValue::Blessed {
+                    class: Arc::from("Bio::EnsEMBL::Gene"),
+                    value: Arc::new(SValue::Hash(Arc::new(gene))),
+                },
+            );
+        }
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "11".to_string(),
+            start: 22_827_233,
+            end: 22_860_417,
+            source_start: 22_827_233,
+            source_end: 22_860_417,
+            strand: 1,
+            stable_id: "NR_187205.1".to_string(),
+        };
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        batch_gene_bounds(&batch.finish().unwrap())
+    }
+
+    fn json_gene_bounds(bounds: Option<(Option<i64>, Option<i64>)>) -> (Option<i64>, Option<i64>) {
+        // The Storable decoder recognizes the JSON: prefix and exercises the JSON extraction path.
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let mut payload = json!({
+            "stable_id": "NR_187205.1",
+            "strand": 1,
+            "biotype": "protein_coding",
+        });
+        if let Some((start, end)) = bounds {
+            let mut gene = serde_json::Map::new();
+            if let Some(start) = start {
+                gene.insert("start".to_string(), json!(start));
+            }
+            if let Some(end) = end {
+                gene.insert("end".to_string(), json!(end));
+            }
+            payload.as_object_mut().unwrap().insert(
+                "_gene".to_string(),
+                json!({"__class": "Bio::EnsEMBL::Gene", "__value": gene}),
+            );
+        }
+        let line = format!(
+            "11\t22827233\t22860417\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        assert!(written);
+        batch_gene_bounds(&batch.finish().unwrap())
+    }
+
+    #[test]
+    fn append_transcript_storable_row_exports_gene_bounds() {
+        assert_eq!(
+            storable_gene_bounds(Some((Some(22_700_001), Some(23_200_000)))),
+            (Some(22_700_001), Some(23_200_000))
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_exports_gene_bounds() {
+        assert_eq!(
+            json_gene_bounds(Some((Some(22_700_001), Some(23_200_000)))),
+            (Some(22_700_001), Some(23_200_000))
+        );
+    }
+
+    #[test]
+    fn transcript_gene_bounds_are_both_null_when_missing_or_partial() {
+        let readers = [storable_gene_bounds, json_gene_bounds];
+        for read in readers {
+            assert_eq!(read(None), (None, None));
+            assert_eq!(read(Some((Some(22_700_001), None))), (None, None));
+            assert_eq!(read(Some((None, Some(23_200_000)))), (None, None));
+        }
+    }
+
+    #[test]
+    fn transcript_gene_bounds_are_unavailable_for_unparseable_values() {
+        let json_object = json!({
+            "_gene": {
+                "__class": "Bio::EnsEMBL::Gene",
+                "__value": {"start": "not-an-integer", "end": 23_200_000}
+            }
+        });
+        assert_eq!(
+            gene_bounds_from_json_object(json_object.as_object().unwrap()),
+            None
+        );
+
+        let mut gene = HashMap::new();
+        gene.insert(
+            "start".to_string(),
+            SValue::String(Arc::from("not-an-integer")),
+        );
+        gene.insert("end".to_string(), SValue::Int(23_200_000));
+        let mut object = HashMap::new();
+        object.insert(
+            "_gene".to_string(),
+            SValue::Blessed {
+                class: Arc::from("Bio::EnsEMBL::Gene"),
+                value: Arc::new(SValue::Hash(Arc::new(gene))),
+            },
+        );
+        assert_eq!(gene_bounds_from_storable_object(&object), None);
     }
 
     // -----------------------------------------------------------------------
