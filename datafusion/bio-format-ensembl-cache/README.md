@@ -314,7 +314,8 @@ All entity schemas also include **provenance columns**: `species`, `assembly`, `
 ## Projection Pushdown
 
 Transcript, exon, and translation schemas support projection pushdown. When VEP-related
-columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `mature_mirna_regions`,
+columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `gene_start`, `gene_end`,
+`mature_mirna_regions`,
 `cdna_mapper_segments`, `spliced_seq`, `translation_seq`, `cds_sequence`,
 `translation_seq_canonical`, `cds_sequence_canonical`,
 `display_xref_id`, `source_cache`, `refseq_match`, `refseq_edits`,

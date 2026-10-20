@@ -958,6 +958,7 @@ async fn transcript_parquet_roundtrip_translation_seq_edits() -> datafusion::com
             }
             assert!(!gene_start.is_null(i));
             assert!(!gene_end.is_null(i));
+            // This fixture uses the default 1-based transcript coordinates.
             assert!(gene_start.value(i) <= tx_start.value(i));
             assert!(gene_end.value(i) >= tx_end.value(i));
             let value = (!lists.is_null(i)).then(|| {
