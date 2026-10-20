@@ -46,6 +46,22 @@ pub(crate) fn refseq_edit_list_data_type() -> DataType {
     DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
 }
 
+/// Returns the Arrow `DataType` for translation SeqEdits, the edits Ensembl
+/// applies to the reference peptide (`Translation::get_all_SeqEdits`):
+/// `List<Struct<code:Utf8, start:Int64, end:Int64, alt_seq:Utf8>>`.
+///
+/// `start`/`end` are 1-based protein positions; `alt_seq` is never null, and
+/// an empty string is a real value (VEP then leaves the reference peptide undef).
+pub(crate) fn seq_edit_list_data_type() -> DataType {
+    let fields = Fields::from(vec![
+        Field::new("code", DataType::Utf8, false),
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+        Field::new("alt_seq", DataType::Utf8, false),
+    ]);
+    DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
+}
+
 /// Returns the Arrow `DataType` for protein features:
 /// `List<Struct<analysis:Utf8, hseqname:Utf8, start:Int64, end:Int64>>`.
 pub(crate) fn protein_feature_list_data_type() -> DataType {
@@ -213,6 +229,9 @@ pub(crate) fn transcript_schema(
         Field::new("cdna_seq", DataType::Utf8, true),
         Field::new("peptide_seq", DataType::Utf8, true),
         Field::new("codon_table", DataType::Int32, true),
+        // VEFC `seq_edits`: NULL when the key is absent (untranslated), [] when
+        // present and empty. Consumers must treat both as "no edits", as VEP does.
+        Field::new("translation_seq_edits", seq_edit_list_data_type(), true),
         Field::new("tsl", DataType::Int32, true),
         Field::new("appris", DataType::Utf8, true),
         Field::new("mane_select", DataType::Utf8, true),

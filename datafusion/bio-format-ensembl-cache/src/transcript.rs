@@ -10,9 +10,9 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
 use crate::util::{
-    BatchBuilder, ColumnMap, RefseqEditTuple, canonical_json_string, json_bool, json_i32, json_i64,
-    json_str, normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_bool,
-    parse_i64, stable_hash,
+    BatchBuilder, ColumnMap, RefseqEditTuple, SeqEditTuple, canonical_json_string, json_bool,
+    json_i32, json_i64, json_str, normalize_genomic_end, normalize_genomic_start,
+    open_binary_reader, parse_bool, parse_i64, stable_hash,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -61,6 +61,7 @@ pub(crate) struct TranscriptColumnIndices {
     peptide_seq: Option<usize>,
     sequences_projected: bool,
     codon_table: Option<usize>,
+    translation_seq_edits: Option<usize>,
     tsl: Option<usize>,
     appris: Option<usize>,
     mane_select: Option<usize>,
@@ -170,6 +171,7 @@ impl TranscriptColumnIndices {
             peptide_seq,
             sequences_projected,
             codon_table: col_map.get("codon_table"),
+            translation_seq_edits: col_map.get("translation_seq_edits"),
             tsl: col_map.get("tsl"),
             appris: col_map.get("appris"),
             mane_select: col_map.get("mane_select"),
@@ -1185,6 +1187,83 @@ fn storable_promoted_vef_i32(
         .or_else(|| parse(object.get(key)))
 }
 
+// ---------------------------------------------------------------------------
+// Translation SeqEdits
+// ---------------------------------------------------------------------------
+//
+// The VEP dumper deletes the translation's attributes (DumpVEP Core.pm:232),
+// so `_variation_effect_feature_cache->{seq_edits}`, filled from
+// `Translation::get_all_SeqEdits` (AnnotationSource/Database/Transcript.pm:484),
+// is the only offline copy of the edits. Each entry is a blessed
+// `Bio::EnsEMBL::SeqEdit` hash with `code`, `start`, `end` (often Perl
+// strings) and `alt_seq`.
+//
+// - VEFC or key absent -> None (NULL); key present -> the list in source order,
+//   unsorted, since VEP iterates it as stored (TVA.pm:752).
+// - Undef `alt_seq` becomes "", as `SeqEdit::new` does (`$alt_seq ||= ''`).
+// - An entry whose start/end does not parse is skipped: `SeqEdit::new` throws
+//   on those at dump time, so none can exist in a VEP-built cache.
+
+fn storable_translation_seq_edits(
+    object: &std::collections::HashMap<String, SValue>,
+) -> Option<Vec<SeqEditTuple>> {
+    let edits = object
+        .get("_variation_effect_feature_cache")
+        .and_then(SValue::as_hash)?
+        .get("seq_edits")?
+        .as_array()?;
+    Some(
+        edits
+            .iter()
+            .filter_map(|edit| {
+                let edit = edit.as_hash()?;
+                let start = sv_i64(edit.get("start"))?;
+                let end = sv_i64(edit.get("end"))?;
+                let code = edit
+                    .get("code")
+                    .and_then(SValue::as_string)
+                    .unwrap_or_default();
+                let alt_seq = edit
+                    .get("alt_seq")
+                    .and_then(SValue::as_string)
+                    .unwrap_or_default();
+                Some((code, start, end, alt_seq))
+            })
+            .collect(),
+    )
+}
+
+fn json_translation_seq_edits(
+    object: &serde_json::Map<String, Value>,
+) -> Option<Vec<SeqEditTuple>> {
+    let edits = object
+        .get("_variation_effect_feature_cache")
+        .and_then(unwrap_blessed_object_optional)?
+        .get("seq_edits")?
+        .as_array()?;
+    let text = |value: Option<&Value>| match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    Some(
+        edits
+            .iter()
+            .filter_map(|edit| {
+                let edit = unwrap_blessed_object_optional(edit)?;
+                let start = json_i64(edit.get("start"))?;
+                let end = json_i64(edit.get("end"))?;
+                Some((
+                    text(edit.get("code")),
+                    start,
+                    end,
+                    text(edit.get("alt_seq")),
+                ))
+            })
+            .collect(),
+    )
+}
+
 fn json_sequence_value(value: Option<&Value>) -> Option<String> {
     let value = value?;
     json_str(Some(value)).or_else(|| {
@@ -1613,6 +1692,9 @@ pub(crate) fn parse_transcript_line_into(
     // MT transcripts store "2" there as a string.
     if let Some(idx) = col_idx.codon_table {
         batch.set_opt_i32(idx, json_promoted_vef_i32(object, "codon_table"));
+    }
+    if let Some(idx) = col_idx.translation_seq_edits {
+        batch.set_seq_edit_list(idx, json_translation_seq_edits(object).as_deref());
     }
     // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     // Fall back to top-level "tsl" for forward-compat with future cache formats.
@@ -2171,6 +2253,9 @@ fn append_transcript_storable_row_into(
     // Simple scalar VEP fields
     if let Some(idx) = col_idx.codon_table {
         batch.set_opt_i32(idx, storable_promoted_vef_i32(object, "codon_table"));
+    }
+    if let Some(idx) = col_idx.translation_seq_edits {
+        batch.set_seq_edit_list(idx, storable_translation_seq_edits(object).as_deref());
     }
     // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     if let Some(idx) = col_idx.tsl {
@@ -4050,5 +4135,320 @@ mod tests {
         minus.with_start_exon = false;
         assert_eq!(storable_cds_bounds(&minus), (Some(1048), Some(2150)));
         assert_eq!(json_cds_bounds(&minus), (Some(1048), Some(2150)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Translation SeqEdits (`translation_seq_edits`), read from
+    // `_variation_effect_feature_cache->{seq_edits}`: the only offline copy of
+    // the edits VEP applies to the reference peptide (TVA.pm:742-772).
+    // NULL = no VEFC or key absent; [] = key present and empty.
+    // -----------------------------------------------------------------------
+
+    type SeqEditRow = (String, i64, i64, String);
+
+    fn batch_seq_edits(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+    ) -> Option<Vec<SeqEditRow>> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name("translation_seq_edits")
+            .expect("missing translation_seq_edits column");
+        let list = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("expected ListArray for translation_seq_edits");
+        if list.is_null(0) {
+            return None;
+        }
+        let values = list.value(0);
+        let structs = values
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("expected StructArray items");
+        let code = structs
+            .column_by_name("code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let start = structs
+            .column_by_name("start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let end = structs
+            .column_by_name("end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let alt = structs
+            .column_by_name("alt_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        Some(
+            (0..structs.len())
+                .map(|i| {
+                    assert!(!alt.is_null(i), "alt_seq must never be null");
+                    (
+                        code.value(i).to_string(),
+                        start.value(i),
+                        end.value(i),
+                        alt.value(i).to_string(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// A blessed `Bio::EnsEMBL::SeqEdit` as the raw cache stores it: `start`
+    /// and `end` are Perl strings, `alt_seq` may be undef.
+    fn storable_seq_edit(code: &str, start: &str, end: &str, alt_seq: Option<&str>) -> SValue {
+        let mut edit = HashMap::new();
+        edit.insert("code".to_string(), SValue::String(Arc::from(code)));
+        edit.insert("name".to_string(), SValue::String(Arc::from(code)));
+        edit.insert("start".to_string(), SValue::String(Arc::from(start)));
+        edit.insert("end".to_string(), SValue::String(Arc::from(end)));
+        if let Some(alt_seq) = alt_seq {
+            edit.insert("alt_seq".to_string(), SValue::String(Arc::from(alt_seq)));
+        }
+        SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::SeqEdit"),
+            value: Arc::new(SValue::Hash(Arc::new(edit))),
+        }
+    }
+
+    enum VefcSeqEdits {
+        NoVefc,
+        KeyAbsent,
+        List(Vec<SValue>),
+    }
+
+    fn storable_seq_edits_with(
+        seq_edits: VefcSeqEdits,
+        components: (
+            BatchBuilder,
+            TranscriptColumnIndices,
+            ProvenanceWriter,
+            CacheInfo,
+        ),
+    ) -> Option<Vec<SeqEditRow>> {
+        let (mut batch, col_idx, provenance, _) = components;
+        let mut object = HashMap::new();
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+        match seq_edits {
+            VefcSeqEdits::NoVefc => {}
+            VefcSeqEdits::KeyAbsent => {
+                let mut vefc = HashMap::new();
+                vefc.insert("peptide".to_string(), SValue::String(Arc::from("MNPL")));
+                object.insert(
+                    "_variation_effect_feature_cache".to_string(),
+                    SValue::Hash(Arc::new(vefc)),
+                );
+            }
+            VefcSeqEdits::List(edits) => {
+                let mut vefc = HashMap::new();
+                vefc.insert("seq_edits".to_string(), SValue::Array(Arc::new(edits)));
+                object.insert(
+                    "_variation_effect_feature_cache".to_string(),
+                    SValue::Blessed {
+                        class: Arc::from("Bio::EnsEMBL::Variation::VariationEffectFeatureCache"),
+                        value: Arc::new(SValue::Hash(Arc::new(vefc))),
+                    },
+                );
+            }
+        }
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "MT".to_string(),
+            start: 4470,
+            end: 5511,
+            source_start: 4470,
+            source_end: 5511,
+            strand: 1,
+            stable_id: "ENST00000361453".to_string(),
+        };
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        batch_seq_edits(&batch.finish().unwrap())
+    }
+
+    fn storable_seq_edits(seq_edits: VefcSeqEdits) -> Option<Vec<SeqEditRow>> {
+        storable_seq_edits_with(seq_edits, transcript_test_components("storable"))
+    }
+
+    fn seq_edit_row(code: &str, start: i64, end: i64, alt: &str) -> SeqEditRow {
+        (code.to_string(), start, end, alt.to_string())
+    }
+
+    #[test]
+    fn append_transcript_storable_row_exports_translation_seq_edits() {
+        // Ensembl ND2 (ENST00000361453): `amino_acid_sub 1 1 M`, start/end as strings.
+        let got = storable_seq_edits(VefcSeqEdits::List(vec![storable_seq_edit(
+            "amino_acid_sub",
+            "1",
+            "1",
+            Some("M"),
+        )]));
+        assert_eq!(got, Some(vec![seq_edit_row("amino_acid_sub", 1, 1, "M")]));
+    }
+
+    #[test]
+    fn append_transcript_storable_row_seq_edits_keeps_empty_alt_seq() {
+        // MPZ NM_001315491.2: `amino_acid_sub 249 249 ""`; undef alt maps to ""
+        // too, as SeqEdit::new does (`$alt_seq ||= ''`, SeqEdit.pm:169).
+        let got = storable_seq_edits(VefcSeqEdits::List(vec![
+            storable_seq_edit("amino_acid_sub", "249", "249", Some("")),
+            storable_seq_edit("amino_acid_sub", "250", "250", None),
+        ]));
+        assert_eq!(
+            got,
+            Some(vec![
+                seq_edit_row("amino_acid_sub", 249, 249, ""),
+                seq_edit_row("amino_acid_sub", 250, 250, ""),
+            ])
+        );
+    }
+
+    #[test]
+    fn append_transcript_storable_row_seq_edits_empty_list_vs_null() {
+        assert_eq!(storable_seq_edits(VefcSeqEdits::List(vec![])), Some(vec![]));
+        assert_eq!(storable_seq_edits(VefcSeqEdits::KeyAbsent), None);
+        assert_eq!(storable_seq_edits(VefcSeqEdits::NoVefc), None);
+    }
+
+    #[test]
+    fn append_transcript_storable_row_seq_edits_preserves_source_order() {
+        let got = storable_seq_edits(VefcSeqEdits::List(vec![
+            storable_seq_edit("_selenocysteine", "300", "300", Some("U")),
+            storable_seq_edit("_selenocysteine", "12", "12", Some("U")),
+            storable_seq_edit("initial_met", "1", "1", Some("M")),
+        ]));
+        assert_eq!(
+            got,
+            Some(vec![
+                seq_edit_row("_selenocysteine", 300, 300, "U"),
+                seq_edit_row("_selenocysteine", 12, 12, "U"),
+                seq_edit_row("initial_met", 1, 1, "M"),
+            ])
+        );
+    }
+
+    #[test]
+    fn append_transcript_storable_row_seq_edits_skips_unparseable_entry() {
+        let got = storable_seq_edits(VefcSeqEdits::List(vec![
+            storable_seq_edit("amino_acid_sub", "x", "1", Some("M")),
+            storable_seq_edit("_stop_codon_rt", "249", "249", Some("X")),
+        ]));
+        assert_eq!(
+            got,
+            Some(vec![seq_edit_row("_stop_codon_rt", 249, 249, "X")])
+        );
+    }
+
+    fn json_seq_edits(vefc: Option<serde_json::Value>) -> Option<Vec<SeqEditRow>> {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let mut payload = json!({
+            "stable_id": "ENST00000361453",
+            "strand": 1,
+            "biotype": "protein_coding",
+        });
+        if let Some(vefc) = vefc {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("_variation_effect_feature_cache".to_string(), vefc);
+        }
+        let line = format!(
+            "MT\t4470\t5511\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+        assert!(written);
+        batch_seq_edits(&batch.finish().unwrap())
+    }
+
+    #[test]
+    fn parse_transcript_line_exports_translation_seq_edits() {
+        let blessed = |code: &str, start: &str, end: &str, alt: serde_json::Value| {
+            json!({"__class": "Bio::EnsEMBL::SeqEdit", "__value": {
+                "code": code, "name": code, "start": start, "end": end, "alt_seq": alt
+            }})
+        };
+        assert_eq!(
+            json_seq_edits(Some(json!({"seq_edits": [
+                blessed("amino_acid_sub", "1", "1", json!("M")),
+                blessed("amino_acid_sub", "249", "249", json!("")),
+                blessed("amino_acid_sub", "250", "250", serde_json::Value::Null),
+            ]}))),
+            Some(vec![
+                seq_edit_row("amino_acid_sub", 1, 1, "M"),
+                seq_edit_row("amino_acid_sub", 249, 249, ""),
+                seq_edit_row("amino_acid_sub", 250, 250, ""),
+            ])
+        );
+        assert_eq!(json_seq_edits(Some(json!({"seq_edits": []}))), Some(vec![]));
+        assert_eq!(json_seq_edits(Some(json!({"peptide": "MNPL"}))), None);
+        assert_eq!(json_seq_edits(None), None);
+    }
+
+    /// Projecting only `stable_id` and the new column must still fill it: the
+    /// VEFC sequence block is gated on other columns being projected.
+    #[test]
+    fn translation_seq_edits_parsed_when_only_column_projected() {
+        let cache_info = test_cache_info("storable");
+        let full = transcript_schema(
+            &cache_info,
+            false,
+            crate::source_type::CacheSourceType::Ensembl,
+        );
+        let indices = ["stable_id", "translation_seq_edits"]
+            .iter()
+            .map(|name| full.index_of(name).unwrap())
+            .collect::<Vec<_>>();
+        let schema = Arc::new(full.project(&indices).unwrap());
+        let col_map = ColumnMap::from_schema(&schema);
+        let components = (
+            BatchBuilder::new(schema, 1).unwrap(),
+            TranscriptColumnIndices::new(&col_map),
+            ProvenanceWriter::new(&col_map, &cache_info),
+            cache_info,
+        );
+        let got = storable_seq_edits_with(
+            VefcSeqEdits::List(vec![storable_seq_edit(
+                "amino_acid_sub",
+                "1",
+                "1",
+                Some("M"),
+            )]),
+            components,
+        );
+        assert_eq!(got, Some(vec![seq_edit_row("amino_acid_sub", 1, 1, "M")]));
     }
 }
