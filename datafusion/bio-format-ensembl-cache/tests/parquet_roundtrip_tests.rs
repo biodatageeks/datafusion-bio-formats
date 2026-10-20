@@ -886,3 +886,114 @@ async fn parquet_roundtrip_zero_based_coordinates() -> datafusion::common::Resul
 
     Ok(())
 }
+
+/// `translation_seq_edits` (List<Struct<code, start, end, alt_seq>>) survives a
+/// Parquet round trip, including the empty-string `alt_seq` of a RefSeq
+/// `amino_acid_sub` (MPZ NM_001315491.2), the empty list of RefSeq ND2 and
+/// the NULL of an untranslated transcript.
+#[tokio::test]
+async fn transcript_parquet_roundtrip_translation_seq_edits() -> datafusion::common::Result<()> {
+    let temp_dir = TempDir::new().unwrap();
+    let provider = TranscriptTableProvider::new(
+        EnsemblCacheOptions::new(fixture_path("transcript_seq_edits_116"))
+            .with_cache_source_type(CacheSourceType::Merged),
+    )?;
+    let parquet_path = write_provider_to_parquet(Arc::new(provider), "transcript", &temp_dir).await;
+
+    // Read the file back with the plain Parquet reader: it returns the written
+    // Arrow types (Utf8, not DataFusion's view types).
+    let wanted = [
+        "ENST00000361453",
+        "ENST00000387314",
+        "ND2",
+        "NM_001315491.2",
+    ];
+    let file = std::fs::File::open(&parquet_path).unwrap();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .build()
+        .unwrap();
+    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+    let mut got = Vec::new();
+    for batch in &batches {
+        let ids = batch
+            .column_by_name("stable_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let lists = batch
+            .column_by_name("translation_seq_edits")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            if !wanted.contains(&ids.value(i)) {
+                continue;
+            }
+            let value = (!lists.is_null(i)).then(|| {
+                let values = lists.value(i);
+                let s = values.as_any().downcast_ref::<StructArray>().unwrap();
+                let alt = s
+                    .column_by_name("alt_seq")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let code = s
+                    .column_by_name("code")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let start = s
+                    .column_by_name("start")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let end = s
+                    .column_by_name("end")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                (0..s.len())
+                    .map(|j| {
+                        assert!(!alt.is_null(j));
+                        (
+                            code.value(j).to_string(),
+                            start.value(j),
+                            end.value(j),
+                            alt.value(j).to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            got.push((ids.value(i).to_string(), value));
+        }
+    }
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            (
+                "ENST00000361453".to_string(),
+                Some(vec![("amino_acid_sub".to_string(), 1, 1, "M".to_string())])
+            ),
+            ("ENST00000387314".to_string(), None),
+            ("ND2".to_string(), Some(vec![])),
+            (
+                "NM_001315491.2".to_string(),
+                Some(vec![(
+                    "amino_acid_sub".to_string(),
+                    249,
+                    249,
+                    String::new()
+                )])
+            ),
+        ]
+    );
+    Ok(())
+}
