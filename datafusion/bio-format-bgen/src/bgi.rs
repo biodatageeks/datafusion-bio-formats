@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use bytes::Bytes;
 use datafusion::common::{DataFusionError, Result, ScalarValue};
@@ -11,7 +11,7 @@ use log::debug;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::catalog::IndexedVariant;
 use crate::header::BgenHeader;
@@ -19,6 +19,29 @@ use crate::source::ObjectAccess;
 use crate::table_provider::{BgenReadOptions, IndexReadCost, StaleBgiPolicy};
 
 static CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CACHE_ENTRY_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+
+/// Keep one download in flight per destination without holding the directory
+/// lock. Weak references let completed downloads leave the registry; a waiter
+/// owns a strong reference until it has finished using the entry.
+async fn lock_cache_entry(destination: &Path) -> OwnedMutexGuard<()> {
+    let entry = {
+        let mut entries = CACHE_ENTRY_LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .await;
+        entries.retain(|_, entry| entry.strong_count() > 0);
+        match entries.get(destination).and_then(Weak::upgrade) {
+            Some(entry) => entry,
+            None => {
+                let entry = Arc::new(Mutex::new(()));
+                entries.insert(destination.to_path_buf(), Arc::downgrade(&entry));
+                entry
+            }
+        }
+    };
+    entry.lock_owned().await
+}
 
 /// Host parameters a single index lookup may bind.
 ///
@@ -713,8 +736,9 @@ async fn validate_identity(
 /// The key comes from the object's identity rather than its bytes, so the cache
 /// can be consulted before anything is fetched — keying on content would mean
 /// downloading a multi-gigabyte index to discover it was already cached. The
-/// download runs under the cache lease, so concurrent opens of the same index
-/// wait for the first rather than each fetching their own copy.
+/// download runs under an entry lease, so concurrent opens of the same index
+/// wait for the first rather than each fetching their own copy. The directory
+/// lease covers cache inspection and publication, never a remote transfer.
 async fn cache_remote_index<F, Fut>(
     path: &str,
     validator: Option<&str>,
@@ -749,7 +773,12 @@ where
         .await
         .map_err(|error| index_error(path, &format!("create BGI cache: {error}")))?;
 
-    let lock = CACHE_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    // Canonical paths also coordinate callers using different spellings of the
+    // same directory (relative paths or symlinks).
+    let cache_root = tokio::fs::canonicalize(&cache_root)
+        .await
+        .map_err(|error| index_error(path, &format!("resolve BGI cache: {error}")))?;
+
     // A validator identifies *this version* of the object, so an entry keyed on
     // one can be reused without reading anything. Length alone is not a
     // validator: a replacement of the same length would be served from the cache
@@ -779,6 +808,8 @@ where
         }
     };
     let destination = cache_root.join(format!("{key}.bgi"));
+    let _entry = lock_cache_entry(&destination).await;
+    let lock = CACHE_LOCK.get_or_init(|| Mutex::new(())).lock().await;
     if tokio::fs::metadata(&destination)
         .await
         .is_ok_and(|metadata| metadata.len() == expected_size)
@@ -795,9 +826,9 @@ where
         return Ok((destination, connection));
     }
 
-    evict_cache_entries(&cache_root, incoming, max_cache_bytes, &destination).await?;
-    // Fetched only now that the entry is known to be missing, and under the
-    // lease, so concurrent opens of the same index do not each download it.
+    drop(lock);
+    // Keep the entry lease while downloading, but allow unrelated cache hits
+    // and misses to proceed. No existing entries are removed on fetch failure.
     let bytes = match downloaded {
         Some(bytes) => bytes,
         None => {
@@ -805,11 +836,9 @@ where
             fetch().await?
         }
     };
-    // The object can change between being stated and being read. Eviction has
-    // already made room for the size the stat reported, so writing a different
-    // body would leave the cache over its limit — and the key, derived from that
-    // stat, would name the wrong contents. Neither is worth repairing here:
-    // reject it, and the caller falls back to the object itself.
+    // The object can change between being stated and being read. Reject a body
+    // that no longer matches the stat before evicting anything: it would have
+    // the wrong cache key and could exceed the space reserved for publication.
     if bytes.len() as u64 != expected_size {
         return Err(index_error(
             path,
@@ -821,6 +850,12 @@ where
         ));
     }
 
+    // Other entries may have been published during the transfer, so account
+    // for the current directory contents only after the body is validated.
+    // Retain this lease through publication and opening the connection, which
+    // prevents another entry's eviction from racing either operation.
+    let lock = CACHE_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    evict_cache_entries(&cache_root, incoming, max_cache_bytes, &destination).await?;
     let temporary = cache_root.join(format!(".{key}.{}.tmp", std::process::id()));
     if tokio::fs::try_exists(&temporary).await.unwrap_or(false) {
         tokio::fs::remove_file(&temporary)
@@ -949,4 +984,142 @@ async fn evict_cache_entries(
 
 fn index_error(path: &str, message: &str) -> DataFusionError {
     DataFusionError::Plan(format!("BGI {}: {message}", sanitize_location(path)))
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::cache_remote_index;
+    use bytes::Bytes;
+    use datafusion::common::DataFusionError;
+    use rusqlite::Connection;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    fn sqlite_bytes() -> Bytes {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.bgi");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute("CREATE TABLE Variant (position INTEGER)", [])
+            .unwrap();
+        drop(connection);
+        Bytes::from(std::fs::read(path).unwrap())
+    }
+
+    #[tokio::test]
+    async fn mismatched_download_length_does_not_evict_a_cached_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().to_str().unwrap();
+        let bytes = sqlite_bytes();
+        let size = bytes.len();
+        let (existing, connection) = cache_remote_index(
+            "existing",
+            Some("v1"),
+            size as u64,
+            size,
+            Some(cache),
+            || async { Ok(bytes.clone()) },
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        let error = cache_remote_index(
+            "replacement",
+            Some("v1"),
+            size as u64,
+            size,
+            Some(cache),
+            || async { Ok(bytes.slice(..size - 1)) },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("index changed while it was being read")
+        );
+        assert_eq!(std::fs::read(existing).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(cache).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_download_releases_its_entry_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().to_str().unwrap().to_string();
+        let bytes = sqlite_bytes();
+        let size = bytes.len();
+        let started = Arc::new(Notify::new());
+        let notified = started.clone();
+        let first_cache = cache.clone();
+        let first = tokio::spawn(async move {
+            cache_remote_index(
+                "same",
+                Some("v1"),
+                size as u64,
+                size,
+                Some(&first_cache),
+                || async {
+                    notified.notify_one();
+                    std::future::pending().await
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let (_, connection) = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache_remote_index(
+                "same",
+                Some("v1"),
+                size as u64,
+                size,
+                Some(&cache),
+                || async { Ok(bytes) },
+            ),
+        )
+        .await
+        .expect("cancellation must not strand the entry lease")
+        .unwrap();
+        drop(connection);
+        assert_eq!(std::fs::read_dir(cache).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_can_be_retried_for_the_same_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().to_str().unwrap();
+        let bytes = sqlite_bytes();
+        let size = bytes.len();
+        let failed = cache_remote_index(
+            "same",
+            Some("v1"),
+            size as u64,
+            size,
+            Some(cache),
+            || async { Err(DataFusionError::Execution("download failed".to_string())) },
+        )
+        .await;
+        assert!(failed.is_err());
+        let (_, connection) = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache_remote_index(
+                "same",
+                Some("v1"),
+                size as u64,
+                size,
+                Some(cache),
+                || async { Ok(bytes) },
+            ),
+        )
+        .await
+        .expect("failure must not strand the entry lease")
+        .unwrap();
+        drop(connection);
+        assert_eq!(std::fs::read_dir(cache).unwrap().count(), 1);
+    }
 }
