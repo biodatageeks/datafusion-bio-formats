@@ -1380,7 +1380,7 @@ mod tests {
         );
     }
 
-    /// The two carried record-layout columns are engine plumbing, not INFO
+    /// The carried record-layout columns are engine plumbing, not INFO
     /// data. A caller that hands every non-core batch column to the writer as
     /// an INFO field must not get `##INFO` declarations for them: the
     /// serializer never writes them onto a record, so the header would declare
@@ -1388,8 +1388,9 @@ mod tests {
     #[test]
     fn the_record_layout_columns_are_never_declared_as_info() {
         use datafusion_bio_format_core::metadata::{
-            VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS,
-            VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+            VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN, VCF_RAW_INFO_COLUMN,
+            VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+            VCF_RECORD_LAYOUT_RAW_INFO,
         };
 
         let mut fields = vec![Arc::new(
@@ -1402,6 +1403,7 @@ mod tests {
         for (name, role) in [
             (VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
             (VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
+            (VCF_RAW_INFO_COLUMN, VCF_RECORD_LAYOUT_RAW_INFO),
         ] {
             fields.push(Arc::new(
                 Field::new(name, DataType::Utf8, true).with_metadata(HashMap::from([(
@@ -1416,6 +1418,7 @@ mod tests {
             "DP".to_string(),
             VCF_INFO_KEYS_COLUMN.to_string(),
             VCF_FORMAT_KEYS_COLUMN.to_string(),
+            VCF_RAW_INFO_COLUMN.to_string(),
         ];
         let lines = build_vcf_header_lines(&schema, &info_fields, &[], &[]).unwrap();
 
@@ -1423,7 +1426,11 @@ mod tests {
             lines.iter().any(|line| line.starts_with("##INFO=<ID=DP,")),
             "the real INFO field must still be declared: {lines:?}"
         );
-        for name in [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN] {
+        for name in [
+            VCF_INFO_KEYS_COLUMN,
+            VCF_FORMAT_KEYS_COLUMN,
+            VCF_RAW_INFO_COLUMN,
+        ] {
             assert!(
                 !lines.iter().any(|line| line.contains(name)),
                 "{name} must not be declared in the header: {lines:?}"

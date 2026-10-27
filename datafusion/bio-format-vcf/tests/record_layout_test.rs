@@ -6,7 +6,9 @@
 
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
-use datafusion_bio_format_core::metadata::{VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN};
+use datafusion_bio_format_core::metadata::{
+    VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN, VCF_RAW_INFO_COLUMN,
+};
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use noodles_bcf as bcf;
 use noodles_vcf as vcf;
@@ -45,6 +47,14 @@ chr1	100	rs1	A	T	60	PASS	AF=0.25;DP=50	GT:PS:DP	0/1:.:20
 chr1	200	rs2	G	C	80	PASS	DP=60;AF=0.1	GT:DP:PS	0/0:25:1
 "#;
 
+const ESCAPED_INFO_VCF: &str = r#"##fileformat=VCFv4.3
+##INFO=<ID=CLNVI,Number=1,Type=String,Description="ClinVar variant identifier">
+##INFO=<ID=CLNDN,Number=.,Type=String,Description="ClinVar disease name">
+##contig=<ID=chr17,length=100000000>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr17	42440170	.	A	G	.	PASS	CLNVI=5271%2B80&base_change%3Ddel%20T;CLNDN=first%3Bname,second%2Cname
+"#;
+
 async fn write_fixture(name: &str, content: &str) -> String {
     let path = std::env::temp_dir().join(format!("test_record_layout_{name}.vcf"));
     fs::write(&path, content).await.unwrap();
@@ -66,7 +76,11 @@ async fn round_trip(name: &str, content: &str, carry_layout: bool) -> String {
         source
     };
     let schema = source.schema();
-    let info_fields = vec!["DP".to_string(), "AF".to_string(), "DB".to_string()];
+    let info_fields = if content.contains("CLNVI") {
+        vec!["CLNVI".to_string(), "CLNDN".to_string()]
+    } else {
+        vec!["DP".to_string(), "AF".to_string(), "DB".to_string()]
+    };
     let format_fields = vec!["GT".to_string(), "PS".to_string(), "DP".to_string()];
     let sample_names: Vec<String> = content
         .lines()
@@ -123,6 +137,12 @@ async fn a_carried_layout_round_trips_a_single_sample_record_verbatim() {
     assert_eq!(body(&written), body(SINGLE_SAMPLE_LAYOUT_VCF));
 }
 
+#[tokio::test]
+async fn a_carried_layout_preserves_escaped_info_spelling() {
+    let written = round_trip("escaped_info", ESCAPED_INFO_VCF, true).await;
+    assert_eq!(body(&written), body(ESCAPED_INFO_VCF));
+}
+
 /// What the carry exists to fix. Without it the writer has only the typed
 /// columns: INFO comes back in schema order, and `PS` — null in every sample of
 /// the first record — is dropped as if the record never had it.
@@ -147,11 +167,12 @@ async fn the_layout_columns_are_absent_unless_asked_for() {
     let schema = provider.schema();
     assert!(schema.index_of(VCF_INFO_KEYS_COLUMN).is_err());
     assert!(schema.index_of(VCF_FORMAT_KEYS_COLUMN).is_err());
+    assert!(schema.index_of(VCF_RAW_INFO_COLUMN).is_err());
     let _ = fs::remove_file(&path).await;
 }
 
 #[tokio::test]
-async fn the_layout_columns_are_the_last_two_when_asked_for() {
+async fn the_layout_columns_are_the_last_three_when_asked_for() {
     let path = write_fixture("schema_on", LAYOUT_VCF).await;
     let provider = VcfTableProvider::new(path.clone(), None, None, None, true)
         .unwrap()
@@ -160,8 +181,12 @@ async fn the_layout_columns_are_the_last_two_when_asked_for() {
     let schema = provider.schema();
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert_eq!(
-        &names[names.len() - 2..],
-        &[VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN]
+        &names[names.len() - 3..],
+        &[
+            VCF_INFO_KEYS_COLUMN,
+            VCF_FORMAT_KEYS_COLUMN,
+            VCF_RAW_INFO_COLUMN,
+        ]
     );
     let _ = fs::remove_file(&path).await;
 }

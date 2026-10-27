@@ -87,6 +87,11 @@ pub const VCF_INFO_KEYS_COLUMN: &str = "_vcf_info_keys";
 /// and silently drops the all-missing ones.
 pub const VCF_FORMAT_KEYS_COLUMN: &str = "_vcf_format_keys";
 
+/// Column holding the source VCF's raw INFO text for records that contain a
+/// percent escape. This is nullable and present only when record layout is
+/// carried; typed INFO values remain the logical data columns.
+pub const VCF_RAW_INFO_COLUMN: &str = "_vcf_raw_info";
+
 /// Field-level marker on a carried record-layout column.
 ///
 /// The value is the column's role: `"info_keys"` or `"format_keys"`. A reader
@@ -102,6 +107,9 @@ pub const VCF_RECORD_LAYOUT_INFO_KEYS: &str = "info_keys";
 
 /// Value of [`VCF_RECORD_LAYOUT_KEY`] on the FORMAT key-list column.
 pub const VCF_RECORD_LAYOUT_FORMAT_KEYS: &str = "format_keys";
+
+/// Value of [`VCF_RECORD_LAYOUT_KEY`] on the raw INFO text column.
+pub const VCF_RECORD_LAYOUT_RAW_INFO: &str = "raw_info";
 
 /// The source file's `##` header lines, verbatim and in file order, stored as a
 /// JSON array of strings (the `#CHROM` column line is not included).

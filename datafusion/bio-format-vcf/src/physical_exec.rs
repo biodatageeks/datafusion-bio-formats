@@ -26,7 +26,8 @@ use datafusion_bio_format_core::{
     metadata::{
         VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
         VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN,
-        VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+        VCF_RAW_INFO_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS,
+        VCF_RECORD_LAYOUT_KEY, VCF_RECORD_LAYOUT_RAW_INFO,
     },
     object_storage::{
         CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_storage_type,
@@ -248,6 +249,8 @@ pub(crate) struct ProjectionFlags {
     pub(crate) info_keys: bool,
     /// The carried FORMAT key list column (`_vcf_format_keys`).
     pub(crate) format_keys: bool,
+    /// The raw INFO text column, populated only when that text contains `%`.
+    pub(crate) raw_info: bool,
 }
 
 pub(crate) fn filters_reference_column(filters: &[Expr], name: &str) -> bool {
@@ -291,6 +294,7 @@ impl ProjectionFlags {
                 .is_none_or(|p| p.iter().any(|&i| is_format(i))),
             info_keys: layout.info_keys.is_some_and(&contains),
             format_keys: layout.format_keys.is_some_and(&contains),
+            raw_info: layout.raw_info.is_some_and(&contains),
         }
     }
 }
@@ -306,6 +310,7 @@ impl ProjectionFlags {
 pub(crate) struct RecordLayoutColumns {
     pub(crate) info_keys: Option<usize>,
     pub(crate) format_keys: Option<usize>,
+    pub(crate) raw_info: Option<usize>,
 }
 
 impl RecordLayoutColumns {
@@ -321,6 +326,7 @@ impl RecordLayoutColumns {
         Self {
             info_keys: marked(VCF_RECORD_LAYOUT_INFO_KEYS),
             format_keys: marked(VCF_RECORD_LAYOUT_FORMAT_KEYS),
+            raw_info: marked(VCF_RECORD_LAYOUT_RAW_INFO),
         }
     }
 
@@ -333,26 +339,32 @@ impl RecordLayoutColumns {
     /// every by-name reference to either of them ambiguous. An unmarked field
     /// holding a reserved name is therefore a collision.
     pub(crate) fn source_collisions(schema: &Schema) -> Vec<&'static str> {
-        [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN]
-            .into_iter()
-            .filter(|name| {
-                schema.index_of(name).is_ok_and(|idx| {
-                    !schema
-                        .field(idx)
-                        .metadata()
-                        .contains_key(VCF_RECORD_LAYOUT_KEY)
-                })
+        [
+            VCF_INFO_KEYS_COLUMN,
+            VCF_FORMAT_KEYS_COLUMN,
+            VCF_RAW_INFO_COLUMN,
+        ]
+        .into_iter()
+        .filter(|name| {
+            schema.index_of(name).is_ok_and(|idx| {
+                !schema
+                    .field(idx)
+                    .metadata()
+                    .contains_key(VCF_RECORD_LAYOUT_KEY)
             })
-            .collect()
+        })
+        .collect()
     }
 
     fn holds(&self, index: usize) -> bool {
-        self.info_keys == Some(index) || self.format_keys == Some(index)
+        self.info_keys == Some(index)
+            || self.format_keys == Some(index)
+            || self.raw_info == Some(index)
     }
 }
 
-/// Arrow builders for the 8 core VCF columns, replacing Vec<T> accumulators
-/// to eliminate double-buffering (Vec → Arrow copy at batch boundary).
+/// Arrow builders for the 8 core VCF columns and three carried layout columns,
+/// replacing Vec<T> accumulators to avoid a second copy at batch boundaries.
 pub(crate) struct CoreBatchBuilders {
     chrom: Option<StringBuilder>,
     start: Option<UInt32Builder>,
@@ -364,6 +376,7 @@ pub(crate) struct CoreBatchBuilders {
     filter: Option<StringBuilder>,
     info_keys: Option<StringBuilder>,
     format_keys: Option<StringBuilder>,
+    raw_info: Option<StringBuilder>,
     /// Scratch for building a key list without allocating per record.
     keys_buf: String,
 }
@@ -418,6 +431,11 @@ impl CoreBatchBuilders {
             },
             format_keys: if flags.format_keys {
                 Some(StringBuilder::with_capacity(batch_size, batch_size * 16))
+            } else {
+                None
+            },
+            raw_info: if flags.raw_info {
+                Some(StringBuilder::with_capacity(batch_size, batch_size * 32))
             } else {
                 None
             },
@@ -536,11 +554,20 @@ impl CoreBatchBuilders {
             }
             b.append_value(&self.keys_buf);
         }
+        if let Some(b) = &mut self.raw_info {
+            let info = record.info();
+            let raw = info.as_ref();
+            if raw.as_bytes().contains(&b'%') {
+                b.append_value(raw);
+            } else {
+                b.append_null();
+            }
+        }
     }
 
-    /// Finishes all active builders: the 8 core arrays, then the two carried
+    /// Finishes all active builders: the 8 core arrays, then the three carried
     /// record-layout arrays.
-    pub(crate) fn finish(&mut self) -> [Option<Arc<dyn Array>>; 10] {
+    pub(crate) fn finish(&mut self) -> [Option<Arc<dyn Array>>; 11] {
         [
             self.chrom
                 .as_mut()
@@ -572,18 +599,21 @@ impl CoreBatchBuilders {
             self.format_keys
                 .as_mut()
                 .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.raw_info
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
         ]
     }
 }
 
-/// Constructs a DataFusion RecordBatch from Arrow builder arrays + INFO/FORMAT arrays.
+/// Constructs a DataFusion RecordBatch from core/layout builders + INFO/FORMAT arrays.
 ///
 /// Unlike `build_record_batch` which copies from Vec<T> into Arrow arrays, this function
 /// takes pre-built Arrow arrays from `CoreBatchBuilders::finish()`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_record_batch_from_builders(
     schema: SchemaRef,
-    core_arrays: [Option<Arc<dyn Array>>; 10],
+    core_arrays: [Option<Arc<dyn Array>>; 11],
     infos: Option<&Vec<Arc<dyn Array>>>,
     formats: Option<&Vec<Arc<dyn Array>>>,
     num_info_fields: usize,
@@ -599,6 +629,8 @@ pub(crate) fn build_record_batch_from_builders(
             Some(8)
         } else if layout.format_keys == Some(i) {
             Some(9)
+        } else if layout.raw_info == Some(i) {
+            Some(10)
         } else {
             None
         }
