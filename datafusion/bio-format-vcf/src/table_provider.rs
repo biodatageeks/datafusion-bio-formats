@@ -564,7 +564,7 @@ impl VcfTableProvider {
     /// contains a percent escape) original INFO text in three extra `Utf8`
     /// columns: `_vcf_info_keys`, `_vcf_format_keys`, and `_vcf_raw_info`.
     ///
-    /// Both are per record and neither is recoverable from the typed columns:
+    /// All three are per record and none is recoverable from the typed columns:
     /// every record carries every key the header declares, in schema order, and
     /// a FORMAT key whose value is missing in every sample parses to null
     /// exactly like a key the record never had. A writer that sees these

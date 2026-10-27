@@ -1763,7 +1763,7 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion_bio_format_core::metadata::{
         VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_NUMBER_KEY, VCF_FORMAT_KEYS_COLUMN,
-        VCF_INFO_KEYS_COLUMN,
+        VCF_INFO_KEYS_COLUMN, VCF_RAW_INFO_COLUMN,
     };
 
     /// A layout column as the reader builds it: named for humans, marked for
@@ -1967,7 +1967,7 @@ mod tests {
             Field::new("CLNVI", DataType::Utf8, true),
             layout_field(VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
             layout_field(VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
-            layout_field("_vcf_raw_info", "raw_info"),
+            layout_field(VCF_RAW_INFO_COLUMN, VCF_RECORD_LAYOUT_RAW_INFO),
         ];
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(fields)),
@@ -2002,6 +2002,27 @@ mod tests {
         let changed =
             batch_to_vcf_lines(&changed_batch, &["CLNVI".to_string()], &[], &[], true).unwrap();
         assert_eq!(changed[0].line.split('\t').nth(7), Some("CLNVI=new+value"));
+    }
+
+    #[test]
+    fn raw_numeric_info_values_match_typed_values() {
+        let mut builder = ListBuilder::new(Int32Builder::new());
+        builder.values().append_value(5271);
+        builder.values().append_value(80);
+        builder.append(true);
+        let integer_list = builder.finish();
+        assert!(raw_list_value_matches(
+            integer_list.value(0).as_ref(),
+            "5271,80"
+        ));
+        assert!(!raw_list_value_matches(
+            integer_list.value(0).as_ref(),
+            "5271,81"
+        ));
+
+        let float = Float32Array::from(vec![Some(0.25)]);
+        assert!(raw_scalar_value_matches(&float, 0, "0.25"));
+        assert!(!raw_scalar_value_matches(&float, 0, "0.5"));
     }
 
     /// Whether a column is encoded is decided once per batch, so a reserved

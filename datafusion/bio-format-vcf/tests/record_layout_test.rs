@@ -317,7 +317,11 @@ async fn asking_for_the_layout_twice_is_a_no_op() {
     let twice = once.with_record_layout().unwrap();
 
     assert_eq!(twice.schema().fields().len(), once_fields);
-    for column in [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN] {
+    for column in [
+        VCF_INFO_KEYS_COLUMN,
+        VCF_FORMAT_KEYS_COLUMN,
+        VCF_RAW_INFO_COLUMN,
+    ] {
         let matches = twice
             .schema()
             .fields()
