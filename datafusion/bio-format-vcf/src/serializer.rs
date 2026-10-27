@@ -1189,9 +1189,13 @@ fn build_info_string(
         };
 
         let column = batch.column(col_idx);
-        if let Some(source_entry) = source_values
-            .as_ref()
-            .and_then(|values| values.get(field_name))
+        // A joined Number=. scalar is already final VCF text. Its comma
+        // structure may differ from the source list even when decoding the
+        // source spelling produces the same bytes.
+        if !is_joined_info_text(batch.schema().field(col_idx))
+            && let Some(source_entry) = source_values
+                .as_ref()
+                .and_then(|values| values.get(field_name))
             && raw_info_value_matches(column.as_ref(), row, source_entry.value)
         {
             info_parts.push(source_entry.raw.to_string());
@@ -2002,6 +2006,45 @@ mod tests {
         let changed =
             batch_to_vcf_lines(&changed_batch, &["CLNVI".to_string()], &[], &[], true).unwrap();
         assert_eq!(changed[0].line.split('\t').nth(7), Some("CLNVI=new+value"));
+    }
+
+    #[test]
+    fn joined_number_dot_scalar_does_not_restore_source_list_spelling() {
+        let fields = vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            with_number(Field::new("CSQ", DataType::Utf8, true), "."),
+            layout_field(VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
+            layout_field(VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
+            layout_field(VCF_RAW_INFO_COLUMN, VCF_RECORD_LAYOUT_RAW_INFO),
+        ];
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(StringArray::from(vec!["chr17"])),
+                Arc::new(UInt32Array::from(vec![43_063_793u32])),
+                Arc::new(UInt32Array::from(vec![43_063_794u32])),
+                Arc::new(StringArray::from(vec![Some(".")])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![None])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(StringArray::from(vec![Some("a,b")])),
+                Arc::new(StringArray::from(vec![Some("CSQ")])),
+                Arc::new(StringArray::from(vec![Some("")])),
+                Arc::new(StringArray::from(vec![Some("CSQ=a%2Cb")])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &["CSQ".to_string()], &[], &[], true).unwrap();
+        assert_eq!(lines[0].line.split('\t').nth(7), Some("CSQ=a,b"));
     }
 
     #[test]
