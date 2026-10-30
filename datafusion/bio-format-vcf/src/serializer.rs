@@ -15,6 +15,7 @@ use datafusion_bio_format_core::{
     metadata::{
         VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY,
         VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+        VCF_RECORD_LAYOUT_RAW_INFO,
     },
 };
 
@@ -803,6 +804,7 @@ pub fn batch_to_vcf_lines_for_file_format(
     let info_fields = info_fields.as_slice();
     let carried_info_keys = carried_layout_column(batch, VCF_RECORD_LAYOUT_INFO_KEYS)?;
     let carried_format_keys = carried_layout_column(batch, VCF_RECORD_LAYOUT_FORMAT_KEYS)?;
+    let carried_raw_info = carried_layout_column(batch, VCF_RECORD_LAYOUT_RAW_INFO)?;
 
     // Look up core columns by name
     let chroms = get_string_column_by_name(batch, "chrom")?;
@@ -913,7 +915,14 @@ pub fn batch_to_vcf_lines_for_file_format(
             }
             None => field_order.extend(info_fields.iter().map(String::as_str)),
         }
-        let info_str = build_info_string(batch, row, &field_order, carried_count, &info_columns)?;
+        let info_str = build_info_string(
+            batch,
+            row,
+            &field_order,
+            carried_count,
+            &info_columns,
+            carried_raw_info.as_ref(),
+        )?;
 
         // Build the VCF line
         let mut line = format!(
@@ -965,9 +974,9 @@ pub fn batch_to_vcf_lines_for_file_format(
 /// information and drop it from the output.
 ///
 /// A marked column is engine plumbing: the writer reads it to order INFO and
-/// FORMAT and never puts it on a record, so it must reach neither the record
-/// body nor the header's `##INFO` declarations, whichever list a caller hands
-/// the writer.
+/// FORMAT or preserve raw INFO values, and never puts it on a record, so it
+/// must reach neither the record body nor the header's `##INFO` declarations,
+/// whichever list a caller hands the writer.
 pub(crate) fn is_record_layout_field(schema: &Schema, name: &str) -> bool {
     schema.index_of(name).is_ok_and(|idx| {
         schema
@@ -1165,8 +1174,12 @@ fn build_info_string(
     field_order: &[&str],
     carried_count: usize,
     info_columns: &std::collections::HashMap<String, (usize, InfoEncoding)>,
+    raw_info: Option<&StringColumnRef<'_>>,
 ) -> Result<String> {
     let mut info_parts = Vec::new();
+    let source_values = raw_info
+        .and_then(|column| value_at(column, row))
+        .map(parse_raw_info_entries);
 
     for (position, field_name) in field_order.iter().enumerate() {
         let field_name = *field_name;
@@ -1176,6 +1189,18 @@ fn build_info_string(
         };
 
         let column = batch.column(col_idx);
+        // A joined Number=. scalar is already final VCF text. Its comma
+        // structure may differ from the source list even when decoding the
+        // source spelling produces the same bytes.
+        if !is_joined_info_text(batch.schema().field(col_idx))
+            && let Some(source_entry) = source_values
+                .as_ref()
+                .and_then(|values| values.get(field_name))
+            && raw_info_value_matches(column.as_ref(), row, source_entry.value)
+        {
+            info_parts.push(source_entry.raw.to_string());
+            continue;
+        }
         if column.is_null(row) {
             if position < carried_count {
                 // A Flag has no value to be missing; its key alone is the value.
@@ -1203,6 +1228,109 @@ fn build_info_string(
     } else {
         Ok(info_parts.join(";"))
     }
+}
+
+struct RawInfoEntry<'a> {
+    raw: &'a str,
+    value: Option<&'a str>,
+}
+
+fn parse_raw_info_entries(raw: &str) -> std::collections::HashMap<&str, RawInfoEntry<'_>> {
+    raw.split(';')
+        .filter(|entry| !entry.is_empty() && *entry != ".")
+        .map(|entry| {
+            let (key, value) = entry
+                .split_once('=')
+                .map_or((entry, None), |(key, value)| (key, Some(value)));
+            (key, RawInfoEntry { raw: entry, value })
+        })
+        .collect()
+}
+
+/// Uses the source text only while the typed INFO value still means the same
+/// thing. VEP 116.0 `OutputFactory/VCF.pm:314-350` retains the input `_line`
+/// and appends CSQ; preserving this source spelling keeps `%20`, `%2B`, hex
+/// case, and other equivalent encodings intact through the VCF-in/VCF-out path.
+/// <https://github.com/Ensembl/ensembl-vep/blob/57ea5c52340acc1f156267f810ad162e26597082/modules/Bio/EnsEMBL/VEP/OutputFactory/VCF.pm#L314-L350>
+fn raw_info_value_matches(array: &dyn Array, row: usize, raw: Option<&str>) -> bool {
+    if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
+        if values.is_null(row) {
+            return raw == Some(".");
+        }
+        return match raw {
+            None | Some("true") => values.value(row),
+            Some("false") => !values.value(row),
+            _ => false,
+        };
+    }
+
+    let Some(raw) = raw else {
+        return false;
+    };
+    if raw == "." {
+        return array.is_null(row);
+    }
+    if array.is_null(row) {
+        return false;
+    }
+
+    if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
+        return raw_list_value_matches(values.value(row).as_ref(), raw);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeListArray>() {
+        return raw_list_value_matches(values.value(row).as_ref(), raw);
+    }
+    raw_scalar_value_matches(array, row, raw)
+}
+
+fn raw_list_value_matches(values: &dyn Array, raw: &str) -> bool {
+    let components = raw.split(',').collect::<Vec<_>>();
+    values.len() == components.len()
+        && components
+            .iter()
+            .enumerate()
+            .all(|(index, component)| raw_scalar_value_matches(values, index, component))
+}
+
+fn raw_scalar_value_matches(array: &dyn Array, row: usize, raw: &str) -> bool {
+    if raw == "." {
+        return array.is_null(row);
+    }
+    if array.is_null(row) {
+        return false;
+    }
+
+    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        return raw
+            .parse::<i32>()
+            .is_ok_and(|value| value == values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
+        return raw
+            .parse::<f32>()
+            .is_ok_and(|value| value == values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
+        return raw
+            .parse::<f64>()
+            .is_ok_and(|value| value == values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
+        return percent_encoding::percent_decode_str(raw)
+            .decode_utf8()
+            .is_ok_and(|value| value == values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return percent_encoding::percent_decode_str(raw)
+            .decode_utf8()
+            .is_ok_and(|value| value == values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<StringViewArray>() {
+        return percent_encoding::percent_decode_str(raw)
+            .decode_utf8()
+            .is_ok_and(|value| value == values.value(row));
+    }
+    false
 }
 
 /// Extracts an INFO value as a string from an Arrow array at a specific row
@@ -1639,7 +1767,7 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion_bio_format_core::metadata::{
         VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_NUMBER_KEY, VCF_FORMAT_KEYS_COLUMN,
-        VCF_INFO_KEYS_COLUMN,
+        VCF_INFO_KEYS_COLUMN, VCF_RAW_INFO_COLUMN,
     };
 
     /// A layout column as the reader builds it: named for humans, marked for
@@ -1827,6 +1955,117 @@ mod tests {
             Arc::new(StringArray::from(vec![Some("MedGen:C1|a\u{2013}b é")])),
         );
         assert_eq!(info, "D=MedGen:C1|a\u{2013}b é");
+    }
+
+    #[test]
+    fn unchanged_info_values_preserve_the_source_percent_escape_spelling() {
+        let fields = vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new("CLNVI", DataType::Utf8, true),
+            layout_field(VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
+            layout_field(VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
+            layout_field(VCF_RAW_INFO_COLUMN, VCF_RECORD_LAYOUT_RAW_INFO),
+        ];
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(StringArray::from(vec!["chr17"])),
+                Arc::new(UInt32Array::from(vec![42_440_170u32])),
+                Arc::new(UInt32Array::from(vec![42_440_170u32])),
+                Arc::new(StringArray::from(vec![Some(".")])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![None])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(StringArray::from(vec![Some("5271+80&base_change=del T")])),
+                Arc::new(StringArray::from(vec![Some("CLNVI")])),
+                Arc::new(StringArray::from(vec![Some("")])),
+                Arc::new(StringArray::from(vec![Some(
+                    "CLNVI=5271%2B80&base_change%3Ddel%20T",
+                )])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &["CLNVI".to_string()], &[], &[], true).unwrap();
+        assert_eq!(
+            lines[0].line.split('\t').nth(7),
+            Some("CLNVI=5271%2B80&base_change%3Ddel%20T")
+        );
+
+        let mut changed_columns = batch.columns().to_vec();
+        changed_columns[8] = Arc::new(StringArray::from(vec![Some("new+value")]));
+        let changed_batch = RecordBatch::try_new(batch.schema(), changed_columns).unwrap();
+        let changed =
+            batch_to_vcf_lines(&changed_batch, &["CLNVI".to_string()], &[], &[], true).unwrap();
+        assert_eq!(changed[0].line.split('\t').nth(7), Some("CLNVI=new+value"));
+    }
+
+    #[test]
+    fn joined_number_dot_scalar_does_not_restore_source_list_spelling() {
+        let fields = vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            with_number(Field::new("CSQ", DataType::Utf8, true), "."),
+            layout_field(VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
+            layout_field(VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
+            layout_field(VCF_RAW_INFO_COLUMN, VCF_RECORD_LAYOUT_RAW_INFO),
+        ];
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(StringArray::from(vec!["chr17"])),
+                Arc::new(UInt32Array::from(vec![43_063_793u32])),
+                Arc::new(UInt32Array::from(vec![43_063_794u32])),
+                Arc::new(StringArray::from(vec![Some(".")])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![None])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(StringArray::from(vec![Some("a,b")])),
+                Arc::new(StringArray::from(vec![Some("CSQ")])),
+                Arc::new(StringArray::from(vec![Some("")])),
+                Arc::new(StringArray::from(vec![Some("CSQ=a%2Cb")])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &["CSQ".to_string()], &[], &[], true).unwrap();
+        assert_eq!(lines[0].line.split('\t').nth(7), Some("CSQ=a,b"));
+    }
+
+    #[test]
+    fn raw_numeric_info_values_match_typed_values() {
+        let mut builder = ListBuilder::new(Int32Builder::new());
+        builder.values().append_value(5271);
+        builder.values().append_value(80);
+        builder.append(true);
+        let integer_list = builder.finish();
+        assert!(raw_list_value_matches(
+            integer_list.value(0).as_ref(),
+            "5271,80"
+        ));
+        assert!(!raw_list_value_matches(
+            integer_list.value(0).as_ref(),
+            "5271,81"
+        ));
+
+        let float = Float32Array::from(vec![Some(0.25)]);
+        assert!(raw_scalar_value_matches(&float, 0, "0.25"));
+        assert!(!raw_scalar_value_matches(&float, 0, "0.5"));
     }
 
     /// Whether a column is encoded is decided once per batch, so a reserved

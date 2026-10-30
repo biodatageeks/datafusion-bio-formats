@@ -17,9 +17,10 @@ use datafusion_bio_format_core::metadata::{
     VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY,
     VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_FORMAT_KEYS_COLUMN,
     VCF_GENOTYPE_COUNTED_ALLELE_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY,
-    VCF_HEADER_RAW_LINES_KEY, VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS,
-    VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
-    from_json_string, to_json_string,
+    VCF_HEADER_RAW_LINES_KEY, VCF_INFO_KEYS_COLUMN, VCF_RAW_INFO_COLUMN,
+    VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+    VCF_RECORD_LAYOUT_RAW_INFO, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string,
+    to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
@@ -559,10 +560,11 @@ pub struct VcfTableProvider {
 }
 
 impl VcfTableProvider {
-    /// Carries each record's own INFO key order and FORMAT key list in two
-    /// extra `Utf8` columns, `_vcf_info_keys` and `_vcf_format_keys`.
+    /// Carries each record's own INFO key order, FORMAT key list, and (when it
+    /// contains a percent escape) original INFO text in three extra `Utf8`
+    /// columns: `_vcf_info_keys`, `_vcf_format_keys`, and `_vcf_raw_info`.
     ///
-    /// Both are per record and neither is recoverable from the typed columns:
+    /// All three are per record and none is recoverable from the typed columns:
     /// every record carries every key the header declares, in schema order, and
     /// a FORMAT key whose value is missing in every sample parses to null
     /// exactly like a key the record never had. A writer that sees these
@@ -570,8 +572,8 @@ impl VcfTableProvider {
     /// what a VCF-in / VCF-out pipeline needs to leave records byte-identical.
     ///
     /// Off by default: a read that will not be written back as VCF pays
-    /// nothing. Keys only — values already round-trip through the typed
-    /// columns, so the two columns dictionary-encode to almost nothing.
+    /// nothing. The two key lists are compact; raw INFO is retained only for
+    /// records that contain `%`, leaving ordinary records null in that column.
     ///
     /// The columns are appended last; the provider hands that position to the
     /// scan, which is what tells the reader to populate them.
@@ -602,14 +604,14 @@ impl VcfTableProvider {
         // other is a schema this provider did not build; appending to it would
         // duplicate a name and make the reader's lookup ambiguous.
         let existing = RecordLayoutColumns::locate(&self.schema);
-        match (existing.info_keys, existing.format_keys) {
-            (Some(_), Some(_)) => return Ok(self),
-            (None, None) => {}
+        match (existing.info_keys, existing.format_keys, existing.raw_info) {
+            (Some(_), Some(_), Some(_)) => return Ok(self),
+            (None, None, None) => {}
             _ => {
                 return Err(datafusion::common::DataFusionError::Plan(format!(
-                    "schema already carries one of `{VCF_INFO_KEYS_COLUMN}` / \
-                     `{VCF_FORMAT_KEYS_COLUMN}` but not the other; \
-                     the record layout needs both or neither"
+                    "schema already carries only part of `{VCF_INFO_KEYS_COLUMN}`, \
+                     `{VCF_FORMAT_KEYS_COLUMN}` and `{VCF_RAW_INFO_COLUMN}`; \
+                 the record layout needs all three or none"
                 )));
             }
         }
@@ -618,6 +620,7 @@ impl VcfTableProvider {
         for (name, role) in [
             (VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
             (VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
+            (VCF_RAW_INFO_COLUMN, VCF_RECORD_LAYOUT_RAW_INFO),
         ] {
             // The marker, not the name, is what identifies these downstream: a
             // source VCF may declare a field with either name, and that field

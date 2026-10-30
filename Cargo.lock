@@ -1691,6 +1691,7 @@ dependencies = [
  "noodles-tabix",
  "noodles-vcf",
  "opendal",
+ "percent-encoding",
  "serde_json",
  "smallvec",
  "tempfile",
