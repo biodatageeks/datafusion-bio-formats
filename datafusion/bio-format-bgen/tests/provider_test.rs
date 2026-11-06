@@ -76,6 +76,18 @@ struct HttpRequest {
     range: Option<(usize, usize)>,
 }
 
+#[derive(Default)]
+struct IndexDownloadGate {
+    started: tokio::sync::Notify,
+    released: AtomicBool,
+}
+
+impl IndexDownloadGate {
+    fn release(&self) {
+        self.released.store(true, Ordering::Relaxed);
+    }
+}
+
 struct RangeServer {
     address: std::net::SocketAddr,
     /// Entity tag published for the index object, when the server offers one.
@@ -102,6 +114,7 @@ impl RangeServer {
             bgi,
             Some("ETag: \"drift\"\r\n".to_string()),
             Some(stated),
+            None,
         )
     }
 
@@ -116,7 +129,19 @@ impl RangeServer {
     }
 
     fn start_inner(bgen: Vec<u8>, bgi: Vec<u8>, index_validator: Option<String>) -> Self {
-        Self::start_full(bgen, bgi, index_validator, None)
+        Self::start_full(bgen, bgi, index_validator, None, None)
+    }
+
+    fn start_with_paused_index(bgen: Vec<u8>, bgi: Vec<u8>) -> (Self, Arc<IndexDownloadGate>) {
+        let gate = Arc::new(IndexDownloadGate::default());
+        let server = Self::start_full(
+            bgen,
+            bgi,
+            Some("ETag: \"paused-index\"\r\n".to_string()),
+            None,
+            Some(gate.clone()),
+        );
+        (server, gate)
     }
 
     fn start_full(
@@ -124,6 +149,7 @@ impl RangeServer {
         bgi: Vec<u8>,
         index_validator: Option<String>,
         stated_index_size: Option<u64>,
+        index_download_gate: Option<Arc<IndexDownloadGate>>,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -132,7 +158,10 @@ impl RangeServer {
         let stop = Arc::new(AtomicBool::new(false));
         let server_requests = requests.clone();
         let server_stop = stop.clone();
+        let bgen = Arc::new(bgen);
+        let bgi = Arc::new(bgi);
         let thread = std::thread::spawn(move || {
+            let mut workers = Vec::new();
             let deadline = Instant::now() + Duration::from_secs(30);
             while !server_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                 let (mut stream, _) = match listener.accept() {
@@ -143,80 +172,106 @@ impl RangeServer {
                     }
                     Err(error) => panic!("range server failed: {error}"),
                 };
-                // Accepted sockets can inherit the listener's non-blocking mode,
-                // so reading the request would race the client's write.
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
-                let mut request_bytes = [0_u8; 8192];
-                let size = stream.read(&mut request_bytes).unwrap();
-                let request = String::from_utf8_lossy(&request_bytes[..size]);
-                let mut lines = request.lines();
-                let mut request_line = lines.next().unwrap().split_whitespace();
-                let method = request_line.next().unwrap().to_string();
-                let path = request_line.next().unwrap().to_string();
-                let range = lines.find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    if !name.eq_ignore_ascii_case("range") {
-                        return None;
-                    }
-                    let value = value.trim().strip_prefix("bytes=")?;
-                    let (start, end) = value.split_once('-')?;
-                    Some((start.parse().ok()?, end.parse().ok()?))
-                });
-                server_requests.lock().unwrap().push(HttpRequest {
-                    path: path.clone(),
-                    method: method.clone(),
-                    range,
-                });
+                // Serve connections independently so a paused body does not
+                // also block another provider's metadata requests.
+                let (bgen, bgi) = (bgen.clone(), bgi.clone());
+                let index_validator = index_validator.clone();
+                let index_download_gate = index_download_gate.clone();
+                let server_requests = server_requests.clone();
+                let server_stop = server_stop.clone();
+                workers.push(std::thread::spawn(move || {
+                    // Accepted sockets can inherit the listener's non-blocking mode,
+                    // so reading the request would race the client's write.
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    let mut request_bytes = [0_u8; 8192];
+                    let size = match stream.read(&mut request_bytes) {
+                        Ok(0) | Err(_) => return, // The client may cancel an open.
+                        Ok(size) => size,
+                    };
+                    let request = String::from_utf8_lossy(&request_bytes[..size]);
+                    let mut lines = request.lines();
+                    let mut request_line = lines.next().unwrap().split_whitespace();
+                    let method = request_line.next().unwrap().to_string();
+                    let path = request_line.next().unwrap().to_string();
+                    let range = lines.find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if !name.eq_ignore_ascii_case("range") {
+                            return None;
+                        }
+                        let value = value.trim().strip_prefix("bytes=")?;
+                        let (start, end) = value.split_once('-')?;
+                        Some((start.parse().ok()?, end.parse().ok()?))
+                    });
+                    server_requests.lock().unwrap().push(HttpRequest {
+                        path: path.clone(),
+                        method: method.clone(),
+                        range,
+                    });
 
-                let validator = match (path.as_str(), &index_validator) {
-                    ("/cohort.bgen.bgi", Some(header)) => header.clone(),
-                    _ => String::new(),
-                };
-                let body = match path.as_str() {
-                    "/cohort.bgen" => &bgen,
-                    "/cohort.bgen.bgi" => &bgi,
-                    _ => {
+                    let validator = match (path.as_str(), &index_validator) {
+                        ("/cohort.bgen.bgi", Some(header)) => header.clone(),
+                        _ => String::new(),
+                    };
+                    let body = match path.as_str() {
+                        "/cohort.bgen" => &bgen,
+                        "/cohort.bgen.bgi" => &bgi,
+                        _ => {
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            );
+                            return;
+                        }
+                    };
+                    if method == "GET"
+                        && path == "/cohort.bgen.bgi"
+                        && let Some(gate) = &index_download_gate
+                    {
+                        gate.started.notify_one();
+                        while !gate.released.load(Ordering::Relaxed)
+                            && !server_stop.load(Ordering::Relaxed)
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    if method == "HEAD" {
+                        // A stated length can differ from what is served, as it does
+                        // for an object replaced between the two.
+                        let stated = match (path.as_str(), stated_index_size) {
+                            ("/cohort.bgen.bgi", Some(stated)) => stated,
+                            _ => body.len() as u64,
+                        };
                         let _ = write!(
                             stream,
-                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            "HTTP/1.1 200 OK\r\nContent-Length: {stated}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n"
                         );
-                        continue;
+                    } else if let Some((start, end)) = range {
+                        let end = end.min(body.len() - 1);
+                        let selected = &body[start..=end];
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                            selected.len(),
+                            start,
+                            end,
+                            body.len()
+                        );
+                        let _ = stream.write_all(selected);
+                    } else {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(body);
                     }
-                };
-                if method == "HEAD" {
-                    // A stated length can differ from what is served, as it does
-                    // for an object replaced between the two.
-                    let stated = match (path.as_str(), stated_index_size) {
-                        ("/cohort.bgen.bgi", Some(stated)) => stated,
-                        _ => body.len() as u64,
-                    };
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {stated}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n"
-                    );
-                } else if let Some((start, end)) = range {
-                    let end = end.min(body.len() - 1);
-                    let selected = &body[start..=end];
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                        selected.len(),
-                        start,
-                        end,
-                        body.len()
-                    );
-                    let _ = stream.write_all(selected);
-                } else {
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(body);
-                }
+                }));
+            }
+            for worker in workers {
+                worker.join().unwrap();
             }
         });
         Self {
@@ -1609,6 +1664,287 @@ async fn a_cached_remote_index_is_not_downloaded_again() {
         "the second open must read the cached index, not fetch it again"
     );
     assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+}
+
+fn cached_index_paths(cache: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = fs::read_dir(cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "bgi"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[tokio::test]
+async fn bgi_cache_allows_unrelated_hits_and_misses_during_a_download() {
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let bgen = fs::read(&fixture.bgen).unwrap();
+    let index = fs::read(&fixture.bgi).unwrap();
+    let cached_server = RangeServer::start_with_index_etag(bgen.clone(), index.clone(), "cached");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&fixture._dir.path().join("cache"))),
+        ..Default::default()
+    };
+    BgenTableProvider::try_new(cached_server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let cached_downloads = cached_server.get_requests("cohort.bgen.bgi").len();
+
+    // Both strong validators and content-derived cache keys must keep remote
+    // transfers outside the directory lease.
+    for validator in [Some("ETag: \"slow\"\r\n".to_string()), None] {
+        let gate = Arc::new(IndexDownloadGate::default());
+        let slow_server = RangeServer::start_full(
+            bgen.clone(),
+            index.clone(),
+            validator,
+            None,
+            Some(gate.clone()),
+        );
+        let slow_url = slow_server.url("cohort.bgen");
+        let slow_options = options.clone();
+        let slow = tokio::spawn(BgenTableProvider::try_new(slow_url, slow_options));
+        tokio::time::timeout(Duration::from_secs(5), gate.started.notified())
+            .await
+            .expect("the slow index download must start");
+
+        let fresh_server = RangeServer::start_with_index_etag(bgen.clone(), index.clone(), "fresh");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            BgenTableProvider::try_new(cached_server.url("cohort.bgen"), options.clone())
+                .await
+                .unwrap();
+            BgenTableProvider::try_new(fresh_server.url("cohort.bgen"), options.clone())
+                .await
+                .unwrap();
+        })
+        .await
+        .expect("unrelated cache hits and misses must finish while the download is paused");
+        assert_eq!(
+            cached_server.get_requests("cohort.bgen.bgi").len(),
+            cached_downloads,
+            "an unrelated cache hit must not download the index"
+        );
+        assert!(!slow.is_finished(), "the slow response is still paused");
+        gate.release();
+        slow.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn bgi_cache_coalesces_concurrent_downloads_of_the_same_index() {
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let (server, gate) = RangeServer::start_with_paused_index(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+    let first = tokio::spawn(BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        options.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), gate.started.notified())
+        .await
+        .expect("the first index download must start");
+    let initial_heads = server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.path == "/cohort.bgen.bgi" && request.method == "HEAD")
+        .count();
+    let second = tokio::spawn(BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            // Different spellings of the same directory share an entry lease.
+            bgi_cache_directory: Some(path(&cache.join("../cache"))),
+            ..options
+        },
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let heads = server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.path == "/cohort.bgen.bgi" && request.method == "HEAD")
+                .count();
+            if heads > initial_heads {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the second open must reach the same remote index");
+    tokio::select! {
+        _ = gate.started.notified() => panic!("the second open started a duplicate download"),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+    }
+    gate.release();
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    assert_eq!(server.get_requests("cohort.bgen.bgi").len(), 1);
+    assert_eq!(cached_index_paths(&cache).len(), 1);
+    assert_eq!(
+        fs::read_dir(&cache).unwrap().count(),
+        1,
+        "no temporary remains"
+    );
+}
+
+#[tokio::test]
+async fn bgi_cache_preserves_existing_entries_after_a_failed_download() {
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let bgen = fs::read(&fixture.bgen).unwrap();
+    let index = fs::read(&fixture.bgi).unwrap();
+    let stated = index.len() as u64 + 4_096;
+    let existing_server = RangeServer::start_with_index_etag(bgen.clone(), index.clone(), "good");
+    let failed_server = RangeServer::start_with_index_size_drift(bgen, index.clone(), stated);
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        // Either index fits, but retaining both would exceed this limit.
+        max_bgi_cache_bytes: stated as usize,
+        ..Default::default()
+    };
+    BgenTableProvider::try_new(existing_server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let before = cached_index_paths(&cache);
+    assert_eq!(before.len(), 1);
+    let initial_downloads = existing_server.get_requests("cohort.bgen.bgi").len();
+    let error = BgenTableProvider::try_new(
+        failed_server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_path: Some(failed_server.url("cohort.bgen.bgi")),
+            ..options.clone()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        !failed_server.get_requests("cohort.bgen.bgi").is_empty(),
+        "{error}"
+    );
+    assert_eq!(
+        cached_index_paths(&cache),
+        before,
+        "failed downloads must not evict valid entries"
+    );
+    assert_eq!(fs::read(&before[0]).unwrap(), index);
+    BgenTableProvider::try_new(existing_server.url("cohort.bgen"), options)
+        .await
+        .unwrap();
+    assert_eq!(
+        existing_server.get_requests("cohort.bgen.bgi").len(),
+        initial_downloads
+    );
+    assert_eq!(
+        fs::read_dir(&cache).unwrap().count(),
+        1,
+        "no temporary remains"
+    );
+}
+
+#[tokio::test]
+async fn bgi_cache_still_evicts_after_a_successful_download() {
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let bgen = fs::read(&fixture.bgen).unwrap();
+    let index = fs::read(&fixture.bgi).unwrap();
+    let first_server = RangeServer::start_with_index_etag(bgen.clone(), index.clone(), "first");
+    let second_server = RangeServer::start_with_index_etag(bgen, index.clone(), "second");
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        max_bgi_cache_bytes: index.len(),
+        ..Default::default()
+    };
+    BgenTableProvider::try_new(first_server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let before = cached_index_paths(&cache);
+    BgenTableProvider::try_new(second_server.url("cohort.bgen"), options)
+        .await
+        .unwrap();
+    let after = cached_index_paths(&cache);
+    assert_eq!(after.len(), 1);
+    assert_ne!(after, before);
+    assert_eq!(fs::read(&after[0]).unwrap(), index);
+    assert_eq!(
+        fs::read_dir(&cache).unwrap().count(),
+        1,
+        "no temporary remains"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bgi_cache_rechecks_the_limit_after_concurrent_downloads() {
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let bgen = fs::read(&fixture.bgen).unwrap();
+    let index = fs::read(&fixture.bgi).unwrap();
+    let (first_server, first_gate) =
+        RangeServer::start_with_paused_index(bgen.clone(), index.clone());
+    let (second_server, second_gate) = RangeServer::start_with_paused_index(bgen, index.clone());
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        max_bgi_cache_bytes: index.len(),
+        ..Default::default()
+    };
+    let first = tokio::spawn(BgenTableProvider::try_new(
+        first_server.url("cohort.bgen"),
+        options.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), first_gate.started.notified())
+        .await
+        .unwrap();
+    let second = tokio::spawn(BgenTableProvider::try_new(
+        second_server.url("cohort.bgen"),
+        options,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), second_gate.started.notified())
+        .await
+        .expect("different entries can download concurrently");
+    second_gate.release();
+    let second_provider = second.await.unwrap().unwrap();
+    let second_entry = cached_index_paths(&cache);
+    assert_eq!(second_entry.len(), 1);
+    first_gate.release();
+    let first_provider = first.await.unwrap().unwrap();
+    let first_entry = cached_index_paths(&cache);
+    assert_eq!(first_entry.len(), 1);
+    assert_ne!(first_entry, second_entry);
+    assert_eq!(fs::read(&first_entry[0]).unwrap(), index);
+
+    // POSIX permits eviction while the retained SQLite connection stays open.
+    // Both providers must still answer after the later publication evicts one.
+    for provider in [first_provider, second_provider] {
+        let context = context(1024);
+        context.register_table("b", Arc::new(provider)).unwrap();
+        let batches = context
+            .sql("SELECT rsid FROM b")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            3
+        );
+    }
 }
 
 #[tokio::test]
