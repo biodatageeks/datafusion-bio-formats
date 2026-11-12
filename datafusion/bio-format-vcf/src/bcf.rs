@@ -9,8 +9,10 @@ use datafusion::arrow::array::{Array, Int8Array, ListArray, NullBufferBuilder, S
 use datafusion::arrow::buffer::OffsetBuffer;
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{
@@ -3342,13 +3344,9 @@ impl DisplayAs for BcfExec {
 impl ExecutionPlan for BcfExec {
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
-        ) -> datafusion::common::Result<
-            datafusion::common::tree_node::TreeNodeRecursion,
-        >,
-    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
-        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn name(&self) -> &str {

@@ -7,8 +7,10 @@ use crate::serializer::batch_to_fasta_records;
 use crate::writer::{FastaCompressionType, FastaLocalWriter};
 use datafusion::arrow::array::{RecordBatch, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::{Distribution, EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -103,13 +105,9 @@ impl DisplayAs for FastaWriteExec {
 impl ExecutionPlan for FastaWriteExec {
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
-        ) -> datafusion::common::Result<
-            datafusion::common::tree_node::TreeNodeRecursion,
-        >,
-    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
-        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn name(&self) -> &str {
@@ -255,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_with_new_children_wrong_count() {
+    fn test_replace_children_wrong_count() {
         let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
         let empty = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
             schema.clone(),
@@ -293,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_with_new_children_preserves_properties() {
+    fn test_replace_children_preserves_properties() {
         let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
         let empty = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
             schema.clone(),
@@ -335,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn test_required_input_distribution() {
+    fn test_input_distribution_requirements() {
         let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
         let exec = FastaWriteExec::new(
             Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema)),

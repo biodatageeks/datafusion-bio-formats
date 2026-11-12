@@ -1,6 +1,8 @@
 //! Whole-source partitions with fresh cursors per execution and conservative filter pushdown.
 use crate::{batch_builder, model::NormalizedEntry, options::StructureOptions, schema};
 use async_trait::async_trait;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
 use datafusion::{
     arrow::datatypes::SchemaRef,
@@ -212,13 +214,9 @@ impl ExecutionPlan for StructureExec {
     }
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
-        ) -> datafusion::common::Result<
-            datafusion::common::tree_node::TreeNodeRecursion,
-        >,
-    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
-        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties

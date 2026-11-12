@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Bumped DataFusion from 53.0.0 to 55.2.0 (arrow/parquet 59.2, MSRV 1.94).
+- Bumped DataFusion from 53.0.0 to 55.2.0 (arrow/parquet 59.3.2, MSRV 1.94).
   DataFusion 55 removes `as_any` from its provider/plan traits, makes
   `ExecutionPlan::apply_expressions` required, and returns
   `Arc<Statistics>` from `partition_statistics`; every table provider and

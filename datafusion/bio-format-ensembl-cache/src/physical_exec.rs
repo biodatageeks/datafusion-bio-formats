@@ -24,8 +24,10 @@ use crate::variation::{
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::execution::SendableRecordBatchStream;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::expressions::Column;
@@ -370,13 +372,9 @@ fn parse_region_file_range(name: &str) -> Option<(i64, i64)> {
 impl ExecutionPlan for EnsemblCacheExec {
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
-        ) -> datafusion::common::Result<
-            datafusion::common::tree_node::TreeNodeRecursion,
-        >,
-    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
-        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn name(&self) -> &str {

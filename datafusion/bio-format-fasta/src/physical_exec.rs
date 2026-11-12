@@ -6,7 +6,9 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{
@@ -79,13 +81,9 @@ impl DisplayAs for FastaExec {
 impl ExecutionPlan for FastaExec {
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
-        ) -> datafusion::common::Result<
-            datafusion::common::tree_node::TreeNodeRecursion,
-        >,
-    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
-        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn name(&self) -> &str {
