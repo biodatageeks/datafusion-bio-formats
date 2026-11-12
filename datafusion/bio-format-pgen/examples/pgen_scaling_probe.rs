@@ -104,7 +104,7 @@ async fn main() {
 
 /// The collected plan is wrapped by coalesce/repartition nodes, so walk to it.
 fn find_pgen_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<&PgenExec> {
-    if let Some(exec) = plan.as_any().downcast_ref::<PgenExec>() {
+    if let Some(exec) = plan.downcast_ref::<PgenExec>() {
         return Some(exec);
     }
     for child in plan.children() {

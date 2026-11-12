@@ -1,6 +1,5 @@
 //! Cooler DataFusion table provider.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -382,10 +381,6 @@ impl CoolerTableProvider {
 
 #[async_trait]
 impl TableProvider for CoolerTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -756,7 +751,6 @@ mod tests {
             .await
             .unwrap();
         let chrom_bins = chrom_plan
-            .as_any()
             .downcast_ref::<CoolerExec>()
             .unwrap()
             .bins
@@ -774,7 +768,6 @@ mod tests {
             .await
             .unwrap();
         let start_bins = start_plan
-            .as_any()
             .downcast_ref::<CoolerExec>()
             .unwrap()
             .bins

@@ -28,7 +28,7 @@ use log::{debug, info};
 use noodles_sam::alignment::Record;
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::data::field::Tag;
-use std::any::Any;
+
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -80,12 +80,19 @@ impl DisplayAs for CramExec {
 }
 
 impl ExecutionPlan for CramExec {
-    fn name(&self) -> &str {
-        "CramExec"
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn name(&self) -> &str {
+        "CramExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -274,8 +281,8 @@ async fn get_remote_cram_stream(
 
         // Load all reference sequences for MD/NM tag calculation
         let reference_seqs = reader.load_all_references();
-        if reference_seqs.is_some() {
-            debug!("Loaded {} reference sequences for tag calculation", reference_seqs.as_ref().unwrap().len());
+        if let Some(seqs) = reference_seqs.as_ref() {
+            debug!("Loaded {} reference sequences for tag calculation", seqs.len());
         } else {
             debug!("No external reference available - MD/NM tags will be NULL if not stored");
         }
@@ -560,8 +567,8 @@ async fn get_local_cram(
 
         // Load all reference sequences for MD/NM tag calculation
         let reference_seqs = reader.load_all_references();
-        if reference_seqs.is_some() {
-            debug!("Loaded {} reference sequences for tag calculation", reference_seqs.as_ref().unwrap().len());
+        if let Some(seqs) = reference_seqs.as_ref() {
+            debug!("Loaded {} reference sequences for tag calculation", seqs.len());
         } else {
             debug!("No external reference available - MD/NM tags will be NULL if not stored");
         }

@@ -579,7 +579,16 @@ async fn physical_projection_preserves_metadata_and_empty_projection_row_counts(
             Some("false")
         );
         assert!(plan.execute(1, ctx.task_ctx()).is_err());
-        assert!(plan.clone().with_new_children(vec![plan.clone()]).is_err());
+        assert!(
+            plan.clone()
+                .replace_children(
+                    vec![plan.clone()],
+                    datafusion::physical_plan::execution_plan::ReplaceChildrenOptions::new(
+                        datafusion::physical_plan::execution_plan::ChildrenPropertiesMode::Recompute,
+                    ),
+                )
+                .is_err()
+        );
         let batches = collect(plan, ctx.task_ctx()).await.unwrap();
         assert_eq!(
             batches

@@ -15,7 +15,7 @@ use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
 use log::debug;
-use std::any::Any;
+
 use std::sync::Arc;
 
 /// Determines the Arrow schema for FASTA file records.
@@ -94,10 +94,6 @@ impl FastaTableProvider {
 
 #[async_trait]
 impl TableProvider for FastaTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

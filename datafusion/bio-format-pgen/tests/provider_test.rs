@@ -977,7 +977,7 @@ async fn applies_exact_pvar_pushdowns_limits_and_metadata_projection() {
         )
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let exec = plan.downcast_ref::<PgenExec>().unwrap();
     let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
     assert_eq!(
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
@@ -1005,7 +1005,7 @@ async fn applies_exact_pvar_pushdowns_limits_and_metadata_projection() {
         )
         .await
         .unwrap();
-    let count_exec = count_plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let count_exec = count_plan.downcast_ref::<PgenExec>().unwrap();
     let count_batches = collect(count_plan.clone(), context.task_ctx())
         .await
         .unwrap();
@@ -1038,7 +1038,7 @@ async fn applies_exact_pvar_pushdowns_limits_and_metadata_projection() {
         )
         .await
         .unwrap();
-    let rejected_exec = rejected_plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let rejected_exec = rejected_plan.downcast_ref::<PgenExec>().unwrap();
     assert!(
         collect(rejected_plan.clone(), context.task_ctx())
             .await
@@ -1070,7 +1070,7 @@ async fn honors_empty_sample_and_genotype_field_selection() {
         .scan(&state, Some(&vec![6]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let exec = plan.downcast_ref::<PgenExec>().unwrap();
     let batches = collect(plan.clone(), empty_context.task_ctx())
         .await
         .unwrap();
@@ -1096,7 +1096,7 @@ async fn honors_empty_sample_and_genotype_field_selection() {
         .scan(&state, Some(&vec![6]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let exec = plan.downcast_ref::<PgenExec>().unwrap();
     let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
     assert_eq!(
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
@@ -1148,7 +1148,7 @@ async fn reads_zstd_pvar_and_rejects_hybrid_or_inconsistent_filesets() {
         .scan(&metric_context.state(), None, &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let exec = plan.downcast_ref::<PgenExec>().unwrap();
     assert_eq!(
         exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1,
         expected_companion_bytes
@@ -1420,7 +1420,7 @@ async fn remote_sparse_scan_uses_bounded_pgen_ranges() {
                 .unwrap_or(0)
         })
         .sum::<u64>();
-    let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let exec = plan.downcast_ref::<PgenExec>().unwrap();
     let snapshot = exec.metrics_snapshot();
     assert_eq!(
         snapshot[GenotypeMetric::PrimaryBytesRead as usize].1,

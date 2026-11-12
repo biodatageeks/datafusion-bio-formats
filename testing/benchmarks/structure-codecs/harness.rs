@@ -73,7 +73,9 @@ impl EntrySource for Source {
 }
 
 pub(super) fn config() -> Value {
-    assert!(!cfg!(debug_assertions), "benchmark requires --release");
+    if cfg!(debug_assertions) {
+        panic!("benchmark requires --release");
+    }
     let path = std::env::var("BIO_CODEC_BENCH_CONFIG").expect("benchmark configuration path");
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }

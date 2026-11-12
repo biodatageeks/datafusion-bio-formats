@@ -14,7 +14,6 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use log::debug;
-use std::any::Any;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
@@ -276,10 +275,6 @@ fn group_alignments(runs: &[Run], n: usize) -> Vec<PartitionRange> {
 
 #[async_trait]
 impl TableProvider for StockholmTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
