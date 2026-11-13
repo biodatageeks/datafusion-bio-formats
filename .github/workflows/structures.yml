@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04-arm, macos-14, macos-15-intel, windows-2022]
+        os: [ubuntu-22.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2022]
     runs-on: ${{ matrix.os }}
     env:
       CARGO_PROFILE_TEST_DEBUG: "0"
