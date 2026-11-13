@@ -16,9 +16,11 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::DataFusionError;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::TableType;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::Expr;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -26,7 +28,6 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Pla
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use futures_util::TryStreamExt;
 use log::debug;
-use std::any::Any;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
@@ -130,10 +131,6 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Schema
 
 #[async_trait]
 impl TableProvider for FastaLikeTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -212,10 +209,12 @@ impl ExecutionPlan for FastaLikeExec {
         "FastaLikeExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }

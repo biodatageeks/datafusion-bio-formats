@@ -24,7 +24,7 @@ use datafusion::{
 use datafusion_bio_format_structure::{
     EntrySource, StructureOptions, StructureTableProvider, error,
 };
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 #[derive(Debug, Clone, Default)]
 pub struct FoldcompOptions {
     pub structure: StructureOptions,
@@ -53,9 +53,6 @@ impl FoldcompTableProvider {
 }
 #[async_trait]
 impl TableProvider for FoldcompTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }

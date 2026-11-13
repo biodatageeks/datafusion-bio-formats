@@ -13,7 +13,7 @@ use datafusion::logical_expr::TypeSignature::Exact;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
-use std::any::Any;
+
 use std::sync::Arc;
 
 // ============================================================================
@@ -48,10 +48,6 @@ impl ListAvgUdf {
 }
 
 impl ScalarUDFImpl for ListAvgUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "list_avg"
     }
@@ -178,10 +174,6 @@ impl VcfAnUdf {
 }
 
 impl ScalarUDFImpl for VcfAnUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "vcf_an"
     }
@@ -259,10 +251,6 @@ impl VcfAcUdf {
 }
 
 impl ScalarUDFImpl for VcfAcUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "vcf_ac"
     }
@@ -414,10 +402,6 @@ impl VcfAfUdf {
 }
 
 impl ScalarUDFImpl for VcfAfUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "vcf_af"
     }
@@ -583,10 +567,6 @@ impl ListGteUdf {
 }
 
 impl ScalarUDFImpl for ListGteUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "list_gte"
     }
@@ -685,10 +665,6 @@ impl ListLteUdf {
 }
 
 impl ScalarUDFImpl for ListLteUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "list_lte"
     }
@@ -776,10 +752,6 @@ impl ListAndUdf {
 }
 
 impl ScalarUDFImpl for ListAndUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "list_and"
     }
@@ -874,10 +846,6 @@ impl VcfSetGtsUdf {
 }
 
 impl ScalarUDFImpl for VcfSetGtsUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "vcf_set_gts"
     }

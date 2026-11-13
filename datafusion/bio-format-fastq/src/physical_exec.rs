@@ -5,7 +5,9 @@ use datafusion::arrow::array::{Array, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatchOptions;
 use datafusion::common::DataFusionError;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{
@@ -17,7 +19,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, info};
 use noodles_bgzf::{gzi, io::IndexedReader};
 use noodles_fastq as fastq;
-use std::any::Any;
+
 use std::fmt::{Debug, Formatter};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -296,12 +298,15 @@ impl DisplayAs for FastqExec {
 }
 
 impl ExecutionPlan for FastqExec {
-    fn name(&self) -> &str {
-        "FastqExec"
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn name(&self) -> &str {
+        "FastqExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

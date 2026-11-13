@@ -6,8 +6,10 @@ use datafusion::arrow::array::{
     ArrayRef, RecordBatch, RecordBatchOptions, StringArray, UInt16Array, UInt32Array,
 };
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::companion::sanitize_location;
@@ -16,7 +18,6 @@ use datafusion_bio_format_core::object_storage::{
 };
 use futures::{Stream, StreamExt};
 use noodles_bed::Record;
-use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::io;
 use std::sync::Arc;
@@ -48,11 +49,15 @@ impl DisplayAs for BedExec {
 }
 
 impl ExecutionPlan for BedExec {
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
     fn name(&self) -> &str {
         "BedExec"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache

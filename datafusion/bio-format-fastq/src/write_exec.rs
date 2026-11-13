@@ -7,8 +7,10 @@ use crate::serializer::batch_to_fastq_records;
 use crate::writer::{FastqCompressionType, FastqLocalWriter};
 use datafusion::arrow::array::{RecordBatch, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::{Distribution, EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -17,7 +19,7 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 use log::debug;
-use std::any::Any;
+
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -117,12 +119,15 @@ impl DisplayAs for FastqWriteExec {
 }
 
 impl ExecutionPlan for FastqWriteExec {
-    fn name(&self) -> &str {
-        "FastqWriteExec"
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn name(&self) -> &str {
+        "FastqWriteExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

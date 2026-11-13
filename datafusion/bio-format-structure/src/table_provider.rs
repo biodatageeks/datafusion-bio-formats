@@ -1,6 +1,8 @@
 //! Whole-source partitions with fresh cursors per execution and conservative filter pushdown.
 use crate::{batch_builder, model::NormalizedEntry, options::StructureOptions, schema};
 use async_trait::async_trait;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
 use datafusion::{
     arrow::datatypes::SchemaRef,
@@ -17,7 +19,7 @@ use datafusion::{
     },
 };
 use futures::{StreamExt, stream::BoxStream};
-use std::{any::Any, fmt, sync::Arc};
+use std::{fmt, sync::Arc};
 /// Entries of one source, decoded one at a time as the consumer polls.
 pub type EntryStream = BoxStream<'static, Result<NormalizedEntry>>;
 /// A bounded source of whole entries. Implementations must reopen resources on every call and
@@ -146,9 +148,6 @@ fn stamp(
 }
 #[async_trait]
 impl TableProvider for StructureTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -213,8 +212,11 @@ impl ExecutionPlan for StructureExec {
     fn name(&self) -> &str {
         "StructureExec"
     }
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
