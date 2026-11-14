@@ -394,12 +394,37 @@ pub async fn get_remote_stream_bgzf_head_tolerant(
 /// `GOOGLE_APPLICATION_CREDENTIALS`, then
 /// `<config dir>/gcloud/application_default_credentials.json`, where the
 /// config dir is `$APPDATA`, else `$XDG_CONFIG_HOME`, else `$HOME/.config`.
-fn gcs_ambient_credentials_available(
+/// That mirrors reqsign-google's `DefaultCredentialProvider` and its
+/// `WellKnownCredentialProvider` (`provide_credential/default.rs`). If a
+/// reqsign upgrade changes where ADC is looked up, update
+/// [`gcs_ambient_credential_candidate`] to match.
+async fn gcs_ambient_credentials_available(env_var: impl Fn(&str) -> Option<String>) -> bool {
+    match gcs_ambient_credential_candidate(env_var) {
+        None => false,
+        Some(GcsAmbientCredential::EnvVar) => true,
+        Some(GcsAmbientCredential::WellKnownFile(path)) => tokio::fs::metadata(&path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file()),
+    }
+}
+
+/// Where reqsign would find GCS Application Default Credentials, before any
+/// filesystem check.
+#[derive(Debug, PartialEq, Eq)]
+enum GcsAmbientCredential {
+    /// `GOOGLE_APPLICATION_CREDENTIALS` names a credentials file.
+    EnvVar,
+    /// The gcloud well-known file, which counts only if it exists.
+    WellKnownFile(String),
+}
+
+/// The pure half of [`gcs_ambient_credentials_available`]: which source applies,
+/// derived from the environment alone.
+fn gcs_ambient_credential_candidate(
     env_var: impl Fn(&str) -> Option<String>,
-    is_file: impl Fn(&str) -> bool,
-) -> bool {
+) -> Option<GcsAmbientCredential> {
     if env_var("GOOGLE_APPLICATION_CREDENTIALS").is_some_and(|path| !path.is_empty()) {
-        return true;
+        return Some(GcsAmbientCredential::EnvVar);
     }
     let config_dir = if let Some(dir) = env_var("APPDATA") {
         dir
@@ -408,11 +433,11 @@ fn gcs_ambient_credentials_available(
     } else if let Some(home) = env_var("HOME") {
         format!("{home}/.config")
     } else {
-        return false;
+        return None;
     };
-    is_file(&format!(
+    Some(GcsAmbientCredential::WellKnownFile(format!(
         "{config_dir}/gcloud/application_default_credentials.json"
-    ))
+    )))
 }
 
 /// Whether an error means the backend refused to report the object's size,
@@ -968,10 +993,7 @@ impl RemoteObject {
                     // Sign with ambient credentials when they exist and go
                     // anonymous only when they do not; see
                     // `gcs_ambient_credentials_available`.
-                    if !gcs_ambient_credentials_available(
-                        |name| env::var(name).ok(),
-                        |path| std::path::Path::new(path).is_file(),
-                    ) {
+                    if !gcs_ambient_credentials_available(|name| env::var(name).ok()).await {
                         builder = builder.skip_signature();
                     }
                 } else if let Ok(service_account_key) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
@@ -1480,18 +1502,26 @@ mod s3_region_tests {
 
 #[cfg(test)]
 mod gcs_credential_tests {
-    use super::gcs_ambient_credentials_available;
+    use super::{
+        GcsAmbientCredential, gcs_ambient_credential_candidate, gcs_ambient_credentials_available,
+    };
     use std::collections::HashMap;
 
-    fn available(env: &[(&str, &str)], files: &[&str]) -> bool {
+    fn env_lookup(env: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let env: HashMap<String, String> = env
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        gcs_ambient_credentials_available(
-            |name| env.get(name).cloned(),
-            |path| files.contains(&path),
-        )
+        move |name| env.get(name).cloned()
+    }
+
+    /// Resolves the candidate against an in-memory set of existing files.
+    fn available(env: &[(&str, &str)], files: &[&str]) -> bool {
+        match gcs_ambient_credential_candidate(env_lookup(env)) {
+            None => false,
+            Some(GcsAmbientCredential::EnvVar) => true,
+            Some(GcsAmbientCredential::WellKnownFile(path)) => files.contains(&path.as_str()),
+        }
     }
 
     #[test]
@@ -1529,5 +1559,28 @@ mod gcs_credential_tests {
             &[("APPDATA", "/appdata"), ("XDG_CONFIG_HOME", "/xdg")],
             &[appdata]
         ));
+        // APPDATA takes precedence over XDG_CONFIG_HOME, so a file only under
+        // XDG is not what reqsign would load.
+        assert!(!available(
+            &[("APPDATA", "/appdata"), ("XDG_CONFIG_HOME", "/xdg")],
+            &[xdg]
+        ));
+    }
+
+    #[tokio::test]
+    async fn well_known_file_is_checked_on_the_real_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().to_str().unwrap().to_owned();
+        let env = [("XDG_CONFIG_HOME", config.as_str())];
+        assert!(!gcs_ambient_credentials_available(env_lookup(&env)).await);
+
+        let gcloud = dir.path().join("gcloud");
+        // A directory at the credential path is not a credentials file.
+        std::fs::create_dir_all(gcloud.join("application_default_credentials.json")).unwrap();
+        assert!(!gcs_ambient_credentials_available(env_lookup(&env)).await);
+
+        std::fs::remove_dir(gcloud.join("application_default_credentials.json")).unwrap();
+        std::fs::write(gcloud.join("application_default_credentials.json"), b"{}").unwrap();
+        assert!(gcs_ambient_credentials_available(env_lookup(&env)).await);
     }
 }
