@@ -378,6 +378,43 @@ pub async fn get_remote_stream_bgzf_head_tolerant(
     Ok(bgzf::r#async::io::Reader::new(remote_stream))
 }
 
+/// Whether GCS Application Default Credentials can be found without the VM
+/// metadata service.
+///
+/// `allow_anonymous` has always meant "sign when credentials exist, otherwise
+/// go anonymous" for GCS: OpenDAL up to 0.55 tried to sign and fell back to an
+/// unsigned request when no credential loaded. Since 0.57 OpenDAL only offers
+/// `skip_signature`, which never signs. Without it, a missing credential is a
+/// hard error. To keep private buckets readable with ambient credentials and
+/// public buckets readable without any, the caller skips signing only when
+/// this returns `false`.
+///
+/// It checks the same two sources, in the same way, as the reqsign ADC chain
+/// that the GCS service builds with VM metadata disabled:
+/// `GOOGLE_APPLICATION_CREDENTIALS`, then
+/// `<config dir>/gcloud/application_default_credentials.json`, where the
+/// config dir is `$APPDATA`, else `$XDG_CONFIG_HOME`, else `$HOME/.config`.
+fn gcs_ambient_credentials_available(
+    env_var: impl Fn(&str) -> Option<String>,
+    is_file: impl Fn(&str) -> bool,
+) -> bool {
+    if env_var("GOOGLE_APPLICATION_CREDENTIALS").is_some_and(|path| !path.is_empty()) {
+        return true;
+    }
+    let config_dir = if let Some(dir) = env_var("APPDATA") {
+        dir
+    } else if let Some(dir) = env_var("XDG_CONFIG_HOME") {
+        dir
+    } else if let Some(home) = env_var("HOME") {
+        format!("{home}/.config")
+    } else {
+        return false;
+    };
+    is_file(&format!(
+        "{config_dir}/gcloud/application_default_credentials.json"
+    ))
+}
+
 /// Whether an error means the backend refused to report the object's size,
 /// rather than that the object cannot be read.
 ///
@@ -812,7 +849,7 @@ impl RemoteObject {
                     .bucket(bucket_name.as_str())
                     .endpoint(&env::var("AWS_ENDPOINT_URL").unwrap_or_default());
                 if allow_anonymous {
-                    builder = builder.disable_ec2_metadata().allow_anonymous();
+                    builder = builder.disable_ec2_metadata().skip_signature();
                 };
                 if enable_request_payer {
                     builder = builder.enable_request_payer();
@@ -823,8 +860,7 @@ impl RemoteObject {
                             .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
                     ) // 5 minutes
                     .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
-                    .layer(LoggingLayer::default())
-                    .finish();
+                    .layer(LoggingLayer::default());
                 (
                     operator,
                     relative_file_path,
@@ -868,8 +904,7 @@ impl RemoteObject {
                             .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
                     ) // 5 minutes
                     .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
-                    .layer(LoggingLayer::default())
-                    .finish();
+                    .layer(LoggingLayer::default());
                 (
                     operator,
                     blob_info.relative_path,
@@ -908,8 +943,7 @@ impl RemoteObject {
                             .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
                     )
                     .layer(RetryLayer::new().with_max_times(max_retries))
-                    .layer(LoggingLayer::default())
-                    .finish();
+                    .layer(LoggingLayer::default());
                 (
                     operator,
                     path,
@@ -930,7 +964,16 @@ impl RemoteObject {
                 );
                 let mut builder = Gcs::default().bucket(bucket_name.as_str());
                 if allow_anonymous {
-                    builder = builder.disable_vm_metadata().allow_anonymous();
+                    builder = builder.disable_vm_metadata();
+                    // Sign with ambient credentials when they exist and go
+                    // anonymous only when they do not; see
+                    // `gcs_ambient_credentials_available`.
+                    if !gcs_ambient_credentials_available(
+                        |name| env::var(name).ok(),
+                        |path| std::path::Path::new(path).is_file(),
+                    ) {
+                        builder = builder.skip_signature();
+                    }
                 } else if let Ok(service_account_key) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
                     builder = builder.credential_path(service_account_key.as_str());
                 } else {
@@ -944,8 +987,7 @@ impl RemoteObject {
                             .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
                     ) // 5 minutes
                     .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
-                    .layer(LoggingLayer::default())
-                    .finish();
+                    .layer(LoggingLayer::default());
                 (
                     operator,
                     relative_file_path,
@@ -1433,5 +1475,59 @@ mod s3_region_tests {
         .await
         .expect("cancelling detection must release the per-bucket cell");
         assert_eq!(region, "eu-west-1");
+    }
+}
+
+#[cfg(test)]
+mod gcs_credential_tests {
+    use super::gcs_ambient_credentials_available;
+    use std::collections::HashMap;
+
+    fn available(env: &[(&str, &str)], files: &[&str]) -> bool {
+        let env: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        gcs_ambient_credentials_available(
+            |name| env.get(name).cloned(),
+            |path| files.contains(&path),
+        )
+    }
+
+    #[test]
+    fn no_env_and_no_file_means_anonymous() {
+        assert!(!available(&[], &[]));
+        assert!(!available(&[("HOME", "/home/u")], &[]));
+    }
+
+    #[test]
+    fn explicit_credentials_env_var_signs() {
+        assert!(available(
+            &[("GOOGLE_APPLICATION_CREDENTIALS", "/k.json")],
+            &[]
+        ));
+        assert!(!available(&[("GOOGLE_APPLICATION_CREDENTIALS", "")], &[]));
+    }
+
+    #[test]
+    fn well_known_file_follows_the_reqsign_config_dir_order() {
+        let home = "/home/u/.config/gcloud/application_default_credentials.json";
+        let xdg = "/xdg/gcloud/application_default_credentials.json";
+        let appdata = "/appdata/gcloud/application_default_credentials.json";
+        assert!(available(&[("HOME", "/home/u")], &[home]));
+        assert!(available(
+            &[("HOME", "/home/u"), ("XDG_CONFIG_HOME", "/xdg")],
+            &[xdg]
+        ));
+        // XDG_CONFIG_HOME takes precedence over HOME, so a file only under HOME
+        // is not what reqsign would load.
+        assert!(!available(
+            &[("HOME", "/home/u"), ("XDG_CONFIG_HOME", "/xdg")],
+            &[home]
+        ));
+        assert!(available(
+            &[("APPDATA", "/appdata"), ("XDG_CONFIG_HOME", "/xdg")],
+            &[appdata]
+        ));
     }
 }
