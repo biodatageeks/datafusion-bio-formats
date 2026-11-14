@@ -46,6 +46,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Remote reads no longer retry forever when a request fails mid-stream (for
+  example a truncated body, a timeout or a connection reset). The OpenDAL
+  revision we pinned reported almost every read error as
+  `io::ErrorKind::Interrupted`. tokio 1.54, which DataFusion 55 requires,
+  retries `Interrupted` inside `read_until` / `read_exact` / `read_to_end`, the
+  same as std. Each retry made OpenDAL reopen a ranged GET, so the error never
+  reached the caller and `max_retries` was ignored. This is what hung the BED
+  remote-reader test in CI. Moved `opendal` from git rev `1755db1` to the
+  0.59.5 release, which maps these errors to `Other` (apache/opendal#7940).
+  The release no longer pulls the `reqsign 0.16` / `jsonwebtoken` chain that
+  the git pin was avoiding.
+- GCS with `allow_anonymous = true` (the default) still signs with ambient
+  credentials when they exist (`GOOGLE_APPLICATION_CREDENTIALS` or the gcloud
+  ADC file), and goes anonymous only when there are none. OpenDAL 0.57
+  replaced that fallback with `skip_signature`, which never signs, so it is now
+  decided in `bio-format-core`. S3 already never signed with `allow_anonymous`
+  and is unchanged.
 - Ensembl cache transcripts take `cds_start`/`cds_end` from the translation
   (`start`/`end` on the unedited `start_exon`/`end_exon`), as Ensembl's
   `Transcript::coding_region_start/end` does, instead of mapping

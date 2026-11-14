@@ -38,11 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .region("us-east-1")
         .bucket(BUCKET)
         .disable_ec2_metadata()
-        .allow_anonymous();
+        .skip_signature();
 
-    let operator = Operator::new(builder)?
-        .layer(LoggingLayer::default())
-        .finish();
+    let operator = Operator::new(builder)?.layer(LoggingLayer::default());
 
     let setup_time = start_time.elapsed();
     println!("Setup time: {setup_time:?}");
