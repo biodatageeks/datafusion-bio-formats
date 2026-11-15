@@ -1,4 +1,4 @@
-use crate::storage::{FastqLocalReader, FastqRemoteReader};
+use crate::storage::FastqRemoteReader;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, RecordBatch, StringBuilder};
@@ -62,6 +62,7 @@ pub(crate) enum FastqPartitionStrategy {
     /// about 2x slower than a one-partition BGZF scan.
     LocalSequential(DetectedCompression),
     /// Sequential single-partition async read, for remote files (cloud storage).
+    /// Never used for local files.
     Sequential,
 }
 
@@ -724,77 +725,6 @@ async fn get_remote_fastq_stream(
     Ok(stream)
 }
 
-async fn get_local_fastq(
-    file_path: String,
-    schema: SchemaRef,
-    batch_size: usize,
-    projection: Option<Vec<usize>>,
-    object_storage_options: Option<ObjectStorageOptions>,
-) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
-{
-    let mut reader = FastqLocalReader::new(file_path, object_storage_options).await?;
-
-    let stream = try_stream! {
-        let proj_indices = projection.as_ref();
-        let mut records = reader.read_records().await;
-        let mut record_num = 0usize;
-        let mut batch_num = 0usize;
-
-        loop {
-            let mut names = proj_indices.is_none_or(|p| p.contains(&0)).then(StringBuilder::new);
-            let mut descriptions = proj_indices.is_none_or(|p| p.contains(&1)).then(StringBuilder::new);
-            let mut sequences = proj_indices.is_none_or(|p| p.contains(&2)).then(StringBuilder::new);
-            let mut quality_scores = proj_indices.is_none_or(|p| p.contains(&3)).then(StringBuilder::new);
-
-            let mut count = 0;
-            while count < batch_size {
-                match records.next().await {
-                    Some(Ok(record)) => {
-                        if let Some(b) = &mut names {
-                            b.append_value(std::str::from_utf8(record.name()).unwrap());
-                        }
-                        if let Some(b) = &mut descriptions {
-                            if record.description().is_empty() {
-                                b.append_null();
-                            } else {
-                                b.append_value(
-                                    std::str::from_utf8(record.description()).unwrap(),
-                                );
-                            }
-                        }
-                        if let Some(b) = &mut sequences {
-                            b.append_value(std::str::from_utf8(record.sequence()).unwrap());
-                        }
-                        if let Some(b) = &mut quality_scores {
-                            b.append_value(
-                                std::str::from_utf8(record.quality_scores()).unwrap(),
-                            );
-                        }
-                        count += 1;
-                        record_num += 1;
-                    }
-                    Some(Err(e)) => Err(DataFusionError::External(Box::new(e)))?,
-                    None => break,
-                }
-            }
-
-            if count == 0 {
-                break;
-            }
-
-            let batch = build_batch_from_builders(
-                &schema, &projection,
-                &mut names, &mut descriptions, &mut sequences, &mut quality_scores,
-                count,
-            )?;
-            batch_num += 1;
-            debug!("Batch {batch_num}: {count} records (total: {record_num})");
-            yield batch;
-        }
-    };
-    Ok(stream)
-}
-
 async fn get_stream(
     file_path: String,
     schema: SchemaRef,
@@ -805,17 +735,11 @@ async fn get_stream(
     let store_type = get_storage_type(file_path.clone());
 
     match store_type {
-        StorageType::LOCAL => {
-            let stream = get_local_fastq(
-                file_path,
-                schema.clone(),
-                batch_size,
-                projection,
-                object_storage_options,
-            )
-            .await?;
-            Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
-        }
+        // Local files never get the async Sequential strategy:
+        // detect_local_strategy() returns LocalSequential, Bgzf or ByteRange.
+        StorageType::LOCAL => Err(DataFusionError::Internal(format!(
+            "local FASTQ file '{file_path}' reached the remote Sequential reader"
+        ))),
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
             let stream = get_remote_fastq_stream(
                 file_path,
