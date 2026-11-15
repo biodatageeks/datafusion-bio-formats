@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Local FASTQ files read as one partition are decoded synchronously, by the
+  same batch loop as the parallel BGZF and byte-range strategies, instead of
+  through a per-record async stream. This covers plain gzip (now decompressed
+  with `flate2`'s multi-member decoder, zlib-rs backend), BGZF without a
+  `.gzi` index, and uncompressed files at `target_partitions = 1`. On a
+  4.25M-read file at one partition: gzip 4.1-4.4 s -> 2.0-2.1 s, BGZF without
+  an index -15%, uncompressed -35%; indexed BGZF is unchanged. Remote files
+  keep the async path. The new `scan_throughput` example measures this.
 - Bumped DataFusion from 53.0.0 to 55.2.0 (arrow/parquet 59.3.2, MSRV 1.94).
   DataFusion 55 removes `as_any` from its provider/plan traits, makes
   `ExecutionPlan::apply_expressions` required, and returns

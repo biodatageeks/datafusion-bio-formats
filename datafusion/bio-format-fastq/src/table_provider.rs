@@ -127,7 +127,7 @@ impl TableProvider for FastqTableProvider {
         let num_partitions = match &strategy {
             FastqPartitionStrategy::Bgzf { partitions, .. } => partitions.len(),
             FastqPartitionStrategy::ByteRange { partitions } => partitions.len(),
-            FastqPartitionStrategy::Sequential => 1,
+            FastqPartitionStrategy::LocalSequential(_) | FastqPartitionStrategy::Sequential => 1,
         };
 
         Ok(Arc::new(FastqExec {

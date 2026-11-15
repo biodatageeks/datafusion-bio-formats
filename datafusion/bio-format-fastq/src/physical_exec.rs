@@ -1,4 +1,4 @@
-use crate::storage::{FastqLocalReader, FastqRemoteReader};
+use crate::storage::FastqRemoteReader;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, RecordBatch, StringBuilder};
@@ -30,9 +30,10 @@ use std::sync::Arc;
 /// file type, compression format, and available index files:
 ///
 /// - **Local BGZF with GZI index** → [`Bgzf`](Self::Bgzf) (N partitions via block ranges)
-/// - **Local BGZF without GZI index** → [`Sequential`](Self::Sequential) (fallback)
-/// - **Local uncompressed** → [`ByteRange`](Self::ByteRange) (N partitions via byte offsets)
-/// - **Local GZIP** → [`Sequential`](Self::Sequential) (cannot seek into gzip stream)
+/// - **Local BGZF without GZI index** → [`LocalSequential`](Self::LocalSequential)
+/// - **Local uncompressed** → [`ByteRange`](Self::ByteRange) (N partitions via byte offsets),
+///   or [`LocalSequential`](Self::LocalSequential) for one partition
+/// - **Local GZIP** → [`LocalSequential`](Self::LocalSequential) (cannot seek into a gzip stream)
 /// - **Remote (any format)** → [`Sequential`](Self::Sequential) (byte-range seeks not supported)
 ///
 /// N is determined by `SessionConfig::target_partitions()`, capped by block count or file size.
@@ -52,11 +53,16 @@ pub(crate) enum FastqPartitionStrategy {
     /// The file is divided into equal-sized byte ranges, and each partition
     /// synchronizes to the next FASTQ record boundary before reading.
     ByteRange { partitions: Vec<(u64, u64)> },
-    /// Sequential single-partition read (GZIP, remote, or fallback).
+    /// Single-partition read of a local file, decoded synchronously by the same
+    /// batch loop as the parallel strategies.
     ///
-    /// Used when parallel reading is not possible: GZIP-compressed files (no random
-    /// access), remote files (cloud storage), BGZF without a GZI index, or when
-    /// `target_partitions` is 1.
+    /// Used for GZIP (no random access), BGZF without a GZI index, and
+    /// uncompressed files read as one partition. Avoids the per-record async
+    /// stream of [`Sequential`](Self::Sequential), which made a local gzip scan
+    /// about 2x slower than a one-partition BGZF scan.
+    LocalSequential(DetectedCompression),
+    /// Sequential single-partition async read, for remote files (cloud storage).
+    /// Never used for local files.
     Sequential,
 }
 
@@ -109,20 +115,25 @@ pub(crate) fn detect_local_strategy(
                     Ok(FastqPartitionStrategy::Bgzf { partitions, index })
                 }
                 Err(_) => {
-                    // No GZI index — fall back to sequential
-                    Ok(FastqPartitionStrategy::Sequential)
+                    // No GZI index: one partition, decoded sequentially.
+                    Ok(FastqPartitionStrategy::LocalSequential(
+                        DetectedCompression::Bgzf,
+                    ))
                 }
             }
         }
-        DetectedCompression::Gzip => Ok(FastqPartitionStrategy::Sequential),
+        DetectedCompression::Gzip => Ok(FastqPartitionStrategy::LocalSequential(
+            DetectedCompression::Gzip,
+        )),
         DetectedCompression::None => {
             let file_size = std::fs::metadata(file_path)?.len();
+            let sequential = FastqPartitionStrategy::LocalSequential(DetectedCompression::None);
             if file_size == 0 || target_partitions <= 1 {
-                return Ok(FastqPartitionStrategy::Sequential);
+                return Ok(sequential);
             }
             let chunk_size = file_size / target_partitions as u64;
             if chunk_size == 0 {
-                return Ok(FastqPartitionStrategy::Sequential);
+                return Ok(sequential);
             }
             let mut partitions = Vec::with_capacity(target_partitions);
             for i in 0..target_partitions {
@@ -376,6 +387,14 @@ impl ExecutionPlan for FastqExec {
                     batch_size,
                 )
             }
+            FastqPartitionStrategy::LocalSequential(compression) => execute_local_sequential(
+                self.file_path.clone(),
+                *compression,
+                schema,
+                self.projection.clone(),
+                self.limit,
+                batch_size,
+            ),
             FastqPartitionStrategy::Sequential => {
                 let fut = get_stream(
                     self.file_path.clone(),
@@ -501,6 +520,46 @@ fn execute_bgzf_partition(
     let producer = batch_producer(
         fastq_reader,
         is_past_end,
+        schema.clone(),
+        projection,
+        limit,
+        batch_size,
+    );
+    Ok(sync_batch_stream(schema, producer))
+}
+
+/// Buffer for reading compressed input and for the decompressed stream. Larger
+/// than `BufReader`'s 8 KiB default so the decoder and the FASTQ parser work on
+/// big contiguous chunks.
+const LOCAL_BUFFER_SIZE: usize = 256 * 1024;
+
+/// Read a whole local file as one partition, decoding inline on the consuming
+/// tokio worker like the parallel strategies (issue #212).
+///
+/// GZIP is decompressed with `flate2`'s multi-member decoder (zlib-rs
+/// backend), BGZF with noodles' reader (libdeflate).
+fn execute_local_sequential(
+    path: String,
+    compression: DetectedCompression,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+    batch_size: usize,
+) -> datafusion::common::Result<SendableRecordBatchStream> {
+    let file = std::fs::File::open(&path)
+        .map_err(|e| DataFusionError::Execution(format!("open {path}: {e}")))?;
+    let input = BufReader::with_capacity(LOCAL_BUFFER_SIZE, file);
+    let reader: Box<dyn BufRead + Send> = match compression {
+        DetectedCompression::Gzip => Box::new(BufReader::with_capacity(
+            LOCAL_BUFFER_SIZE,
+            flate2::bufread::MultiGzDecoder::new(input),
+        )),
+        DetectedCompression::Bgzf => Box::new(noodles_bgzf::io::Reader::new(input)),
+        DetectedCompression::None => Box::new(input),
+    };
+    let producer = batch_producer(
+        fastq::io::Reader::new(reader),
+        |_| false,
         schema.clone(),
         projection,
         limit,
@@ -666,77 +725,6 @@ async fn get_remote_fastq_stream(
     Ok(stream)
 }
 
-async fn get_local_fastq(
-    file_path: String,
-    schema: SchemaRef,
-    batch_size: usize,
-    projection: Option<Vec<usize>>,
-    object_storage_options: Option<ObjectStorageOptions>,
-) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
-{
-    let mut reader = FastqLocalReader::new(file_path, object_storage_options).await?;
-
-    let stream = try_stream! {
-        let proj_indices = projection.as_ref();
-        let mut records = reader.read_records().await;
-        let mut record_num = 0usize;
-        let mut batch_num = 0usize;
-
-        loop {
-            let mut names = proj_indices.is_none_or(|p| p.contains(&0)).then(StringBuilder::new);
-            let mut descriptions = proj_indices.is_none_or(|p| p.contains(&1)).then(StringBuilder::new);
-            let mut sequences = proj_indices.is_none_or(|p| p.contains(&2)).then(StringBuilder::new);
-            let mut quality_scores = proj_indices.is_none_or(|p| p.contains(&3)).then(StringBuilder::new);
-
-            let mut count = 0;
-            while count < batch_size {
-                match records.next().await {
-                    Some(Ok(record)) => {
-                        if let Some(b) = &mut names {
-                            b.append_value(std::str::from_utf8(record.name()).unwrap());
-                        }
-                        if let Some(b) = &mut descriptions {
-                            if record.description().is_empty() {
-                                b.append_null();
-                            } else {
-                                b.append_value(
-                                    std::str::from_utf8(record.description()).unwrap(),
-                                );
-                            }
-                        }
-                        if let Some(b) = &mut sequences {
-                            b.append_value(std::str::from_utf8(record.sequence()).unwrap());
-                        }
-                        if let Some(b) = &mut quality_scores {
-                            b.append_value(
-                                std::str::from_utf8(record.quality_scores()).unwrap(),
-                            );
-                        }
-                        count += 1;
-                        record_num += 1;
-                    }
-                    Some(Err(e)) => Err(DataFusionError::External(Box::new(e)))?,
-                    None => break,
-                }
-            }
-
-            if count == 0 {
-                break;
-            }
-
-            let batch = build_batch_from_builders(
-                &schema, &projection,
-                &mut names, &mut descriptions, &mut sequences, &mut quality_scores,
-                count,
-            )?;
-            batch_num += 1;
-            debug!("Batch {batch_num}: {count} records (total: {record_num})");
-            yield batch;
-        }
-    };
-    Ok(stream)
-}
-
 async fn get_stream(
     file_path: String,
     schema: SchemaRef,
@@ -747,17 +735,11 @@ async fn get_stream(
     let store_type = get_storage_type(file_path.clone());
 
     match store_type {
-        StorageType::LOCAL => {
-            let stream = get_local_fastq(
-                file_path,
-                schema.clone(),
-                batch_size,
-                projection,
-                object_storage_options,
-            )
-            .await?;
-            Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
-        }
+        // Local files never get the async Sequential strategy:
+        // detect_local_strategy() returns LocalSequential, Bgzf or ByteRange.
+        StorageType::LOCAL => Err(DataFusionError::Internal(format!(
+            "local FASTQ file '{file_path}' reached the remote Sequential reader"
+        ))),
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
             let stream = get_remote_fastq_stream(
                 file_path,
