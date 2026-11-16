@@ -29,9 +29,9 @@ impl StringColumnRef<'_> {
 
     fn is_null(&self, i: usize) -> bool {
         match self {
-            StringColumnRef::Small(arr) => Array::is_null(*arr, i),
-            StringColumnRef::Large(arr) => Array::is_null(*arr, i),
-            StringColumnRef::View(arr) => Array::is_null(*arr, i),
+            StringColumnRef::Small(arr) => arr.is_null(i),
+            StringColumnRef::Large(arr) => arr.is_null(i),
+            StringColumnRef::View(arr) => arr.is_null(i),
         }
     }
 }
@@ -220,7 +220,14 @@ pub fn append_fastq_batch(batch: &RecordBatch, out: &mut Vec<u8>) -> Result<usiz
             )));
         }
 
-        out.reserve(name.len() + description.len() + 2 * sequence.len() + 7);
+        // '@', name, optional ' ' + description, '\n', sequence, "\n+\n",
+        // quality, '\n'.
+        let description_len = if description.is_empty() {
+            0
+        } else {
+            description.len() + 1
+        };
+        out.reserve(name.len() + description_len + 2 * sequence.len() + 6);
         out.push(b'@');
         out.extend_from_slice(name.as_bytes());
         if !description.is_empty() {

@@ -127,6 +127,10 @@ impl FastaLocalWriter {
     pub fn write_batch(&mut self, batch: &RecordBatch, scratch: &mut Vec<u8>) -> Result<usize> {
         scratch.clear();
         let n = append_fasta_batch(batch, scratch)?;
+        // The noodles FASTA writer holds only its fixed line width (80), with no
+        // per-record state or footer, so writing pre-formatted bytes to the
+        // inner writer is equivalent to `write_record`. The byte-equality tests
+        // in serializer.rs check the formats match.
         let result = match self {
             FastaLocalWriter::Plain(writer) => writer.get_mut().write_all(scratch),
             FastaLocalWriter::Gzip(writer) => writer.get_mut().write_all(scratch),

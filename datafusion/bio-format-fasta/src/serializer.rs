@@ -30,9 +30,9 @@ impl StringColumnRef<'_> {
 
     fn is_null(&self, i: usize) -> bool {
         match self {
-            StringColumnRef::Small(arr) => Array::is_null(*arr, i),
-            StringColumnRef::Large(arr) => Array::is_null(*arr, i),
-            StringColumnRef::View(arr) => Array::is_null(*arr, i),
+            StringColumnRef::Small(arr) => arr.is_null(i),
+            StringColumnRef::Large(arr) => arr.is_null(i),
+            StringColumnRef::View(arr) => arr.is_null(i),
         }
     }
 }

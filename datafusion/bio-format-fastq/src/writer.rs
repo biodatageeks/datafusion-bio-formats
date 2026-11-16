@@ -169,6 +169,10 @@ impl FastqLocalWriter {
     pub fn write_batch(&mut self, batch: &RecordBatch, scratch: &mut Vec<u8>) -> Result<usize> {
         scratch.clear();
         let n = append_fastq_batch(batch, scratch)?;
+        // The noodles FASTQ writer holds only its fixed definition separator, with no
+        // per-record state or footer, so writing pre-formatted bytes to the
+        // inner writer is equivalent to `write_record`. The byte-equality tests
+        // in serializer.rs check the formats match.
         let result = match self {
             FastqLocalWriter::Plain(writer) => writer.get_mut().write_all(scratch),
             FastqLocalWriter::Gzip(writer) => writer.get_mut().write_all(scratch),
