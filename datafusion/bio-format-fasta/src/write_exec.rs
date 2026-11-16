@@ -3,7 +3,6 @@
 //! This module provides the physical execution plan for writing DataFusion
 //! query results to FASTA files.
 
-use crate::serializer::batch_to_fasta_records;
 use crate::writer::{FastaCompressionType, FastaLocalWriter};
 use datafusion::arrow::array::{RecordBatch, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -183,6 +182,7 @@ async fn write_fasta_stream(
 ) -> Result<RecordBatch> {
     let mut writer = FastaLocalWriter::with_compression(&output_path, compression)?;
     let mut total_count: u64 = 0;
+    let mut scratch = Vec::new();
 
     while let Some(batch_result) = input.next().await {
         let batch = batch_result?;
@@ -191,9 +191,7 @@ async fn write_fasta_stream(
             continue;
         }
 
-        let records = batch_to_fasta_records(&batch)?;
-        total_count += records.len() as u64;
-        writer.write_records(&records)?;
+        total_count += writer.write_batch(&batch, &mut scratch)? as u64;
     }
 
     writer.finish()?;

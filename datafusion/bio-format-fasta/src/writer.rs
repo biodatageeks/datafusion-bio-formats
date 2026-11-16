@@ -14,6 +14,14 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+use datafusion::arrow::array::RecordBatch;
+
+use crate::serializer::append_fasta_batch;
+
+/// Capacity of the file buffer under every FASTA writer. The default 8 KiB
+/// costs one `write` syscall per 8 KiB of output, which dominated large writes.
+pub const WRITE_BUFFER_SIZE: usize = 4 << 20;
+
 /// Compression type for FASTA output files
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FastaCompressionType {
@@ -75,7 +83,7 @@ impl FastaLocalWriter {
         let file = File::create(path.as_ref()).map_err(|e| {
             DataFusionError::Execution(format!("Failed to create output file: {e}"))
         })?;
-        let buf_writer = BufWriter::new(file);
+        let buf_writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
 
         match compression {
             FastaCompressionType::Plain => {
@@ -108,6 +116,25 @@ impl FastaLocalWriter {
                 DataFusionError::Execution(format!("Failed to write FASTA record: {e}"))
             }),
         }
+    }
+
+    /// Formats every row of `batch` into `scratch` and writes it with one
+    /// `write_all`, returning the number of records written.
+    ///
+    /// Produces the same bytes as [`Self::write_records`] on the records from
+    /// `batch_to_fasta_records`, without allocating a record per row.
+    /// `scratch` is cleared first and can be reused across batches.
+    pub fn write_batch(&mut self, batch: &RecordBatch, scratch: &mut Vec<u8>) -> Result<usize> {
+        scratch.clear();
+        let n = append_fasta_batch(batch, scratch)?;
+        let result = match self {
+            FastaLocalWriter::Plain(writer) => writer.get_mut().write_all(scratch),
+            FastaLocalWriter::Gzip(writer) => writer.get_mut().write_all(scratch),
+            FastaLocalWriter::Bgzf(writer) => writer.get_mut().write_all(scratch),
+        };
+        result
+            .map_err(|e| DataFusionError::Execution(format!("Failed to write FASTA batch: {e}")))?;
+        Ok(n)
     }
 
     /// Writes multiple FASTA records to the file

@@ -14,6 +14,15 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+use datafusion::arrow::array::RecordBatch;
+
+use crate::serializer::append_fastq_batch;
+
+/// Capacity of the file buffer under every FASTQ writer. The default 8 KiB
+/// turned a 5 GB FASTQ into ~630,000 `write` syscalls, which cost more than
+/// formatting the records.
+pub const WRITE_BUFFER_SIZE: usize = 4 << 20;
+
 /// Compression type for FASTQ output files
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FastqCompressionType {
@@ -108,7 +117,7 @@ impl FastqLocalWriter {
         let file = File::create(path.as_ref()).map_err(|e| {
             DataFusionError::Execution(format!("Failed to create output file: {e}"))
         })?;
-        let buf_writer = BufWriter::new(file);
+        let buf_writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
 
         match compression {
             FastqCompressionType::Plain => {
@@ -149,6 +158,25 @@ impl FastqLocalWriter {
                 DataFusionError::Execution(format!("Failed to write FASTQ record: {e}"))
             }),
         }
+    }
+
+    /// Formats every row of `batch` into `scratch` and writes it with one
+    /// `write_all`, returning the number of records written.
+    ///
+    /// Produces the same bytes as [`Self::write_records`] on the records from
+    /// `batch_to_fastq_records`, without allocating a record per row.
+    /// `scratch` is cleared first and can be reused across batches.
+    pub fn write_batch(&mut self, batch: &RecordBatch, scratch: &mut Vec<u8>) -> Result<usize> {
+        scratch.clear();
+        let n = append_fastq_batch(batch, scratch)?;
+        let result = match self {
+            FastqLocalWriter::Plain(writer) => writer.get_mut().write_all(scratch),
+            FastqLocalWriter::Gzip(writer) => writer.get_mut().write_all(scratch),
+            FastqLocalWriter::Bgzf(writer) => writer.get_mut().write_all(scratch),
+        };
+        result
+            .map_err(|e| DataFusionError::Execution(format!("Failed to write FASTQ batch: {e}")))?;
+        Ok(n)
     }
 
     /// Writes multiple FASTQ records to the file

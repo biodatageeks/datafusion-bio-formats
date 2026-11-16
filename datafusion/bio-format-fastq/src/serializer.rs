@@ -3,7 +3,9 @@
 //! This module provides functionality for converting DataFusion Arrow data back
 //! to FASTQ format for writing to files.
 
-use datafusion::arrow::array::{Array, LargeStringArray, RecordBatch, StringArray};
+use datafusion::arrow::array::{
+    Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
+};
 use datafusion::common::{DataFusionError, Result};
 use noodles_fastq as fastq;
 use noodles_fastq::record::Definition;
@@ -13,6 +15,7 @@ use noodles_fastq::record::Definition;
 enum StringColumnRef<'a> {
     Small(&'a StringArray),
     Large(&'a LargeStringArray),
+    View(&'a StringViewArray),
 }
 
 impl StringColumnRef<'_> {
@@ -20,6 +23,7 @@ impl StringColumnRef<'_> {
         match self {
             StringColumnRef::Small(arr) => arr.value(i),
             StringColumnRef::Large(arr) => arr.value(i),
+            StringColumnRef::View(arr) => arr.value(i),
         }
     }
 
@@ -27,6 +31,7 @@ impl StringColumnRef<'_> {
         match self {
             StringColumnRef::Small(arr) => Array::is_null(*arr, i),
             StringColumnRef::Large(arr) => Array::is_null(*arr, i),
+            StringColumnRef::View(arr) => Array::is_null(*arr, i),
         }
     }
 }
@@ -46,9 +51,12 @@ fn get_string_column<'a>(
     if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
         return Ok(StringColumnRef::Large(arr));
     }
+    if let Some(arr) = column.as_any().downcast_ref::<StringViewArray>() {
+        return Ok(StringColumnRef::View(arr));
+    }
 
     Err(DataFusionError::Execution(format!(
-        "Column {index} ({name}) must be Utf8 or LargeUtf8 type"
+        "Column {index} ({name}) must be Utf8, LargeUtf8 or Utf8View type"
     )))
 }
 
@@ -153,6 +161,80 @@ pub fn batch_to_fastq_records(batch: &RecordBatch) -> Result<Vec<fastq::Record>>
     }
 
     Ok(records)
+}
+
+/// Appends the FASTQ text of every row in `batch` to `out`, and returns the
+/// number of records written.
+///
+/// Produces the same bytes as building `fastq::Record`s with
+/// [`batch_to_fastq_records`] and writing them with noodles'
+/// `fastq::io::Writer` (`@name[ description]\nSEQUENCE\n+\nQUALITY\n`), and
+/// applies the same checks, but without allocating a record per row. `out` is
+/// reused across batches by the caller, so a batch costs one `write_all`.
+///
+/// On error `out` may hold the rows formatted before the failing one; the
+/// caller discards it.
+pub fn append_fastq_batch(batch: &RecordBatch, out: &mut Vec<u8>) -> Result<usize> {
+    let num_columns = batch.num_columns();
+    if num_columns < 4 {
+        return Err(DataFusionError::Execution(format!(
+            "FASTQ batch must have at least 4 columns, got {num_columns}"
+        )));
+    }
+
+    let names = get_string_column(batch, 0, "name")?;
+    let descriptions = get_string_column(batch, 1, "description")?;
+    let sequences = get_string_column(batch, 2, "sequence")?;
+    let quality_scores = get_string_column(batch, 3, "quality_scores")?;
+
+    for i in 0..batch.num_rows() {
+        let name = names.value(i);
+        if name.is_empty() {
+            return Err(DataFusionError::Execution(format!(
+                "Row {i}: name cannot be empty"
+            )));
+        }
+        let description = if descriptions.is_null(i) {
+            ""
+        } else {
+            descriptions.value(i)
+        };
+        let sequence = sequences.value(i);
+        if sequence.is_empty() {
+            return Err(DataFusionError::Execution(format!(
+                "Row {i}: sequence cannot be empty"
+            )));
+        }
+        let quality = quality_scores.value(i);
+        if quality.is_empty() {
+            return Err(DataFusionError::Execution(format!(
+                "Row {i}: quality_scores cannot be empty"
+            )));
+        }
+        if sequence.len() != quality.len() {
+            return Err(DataFusionError::Execution(format!(
+                "Row {}: sequence length ({}) must match quality_scores length ({})",
+                i,
+                sequence.len(),
+                quality.len()
+            )));
+        }
+
+        out.reserve(name.len() + description.len() + 2 * sequence.len() + 7);
+        out.push(b'@');
+        out.extend_from_slice(name.as_bytes());
+        if !description.is_empty() {
+            out.push(b' ');
+            out.extend_from_slice(description.as_bytes());
+        }
+        out.push(b'\n');
+        out.extend_from_slice(sequence.as_bytes());
+        out.extend_from_slice(b"\n+\n");
+        out.extend_from_slice(quality.as_bytes());
+        out.push(b'\n');
+    }
+
+    Ok(batch.num_rows())
 }
 
 #[cfg(test)]
@@ -287,5 +369,71 @@ mod tests {
         assert_eq!(records[0].description(), "from polars");
         assert_eq!(records[0].sequence(), b"ACGTACGT");
         assert_eq!(records[0].quality_scores(), b"IIIIIIII");
+    }
+
+    #[test]
+    fn test_append_fastq_batch_matches_noodles_writer() {
+        use datafusion::arrow::array::StringViewArray;
+        use noodles_fastq::io::Writer;
+
+        let names = ["r1", "r2", "r3"];
+        let descriptions = [Some("lane=1 x"), None, Some("")];
+        let sequences = ["ACGTN", "T", "GGCCAATT"];
+        let qualities = ["IIII#", "!", "ABCDEFGH"];
+
+        let utf8 = RecordBatch::try_new(
+            create_test_schema(),
+            vec![
+                Arc::new(StringArray::from(names.to_vec())),
+                Arc::new(StringArray::from(descriptions.to_vec())),
+                Arc::new(StringArray::from(sequences.to_vec())),
+                Arc::new(StringArray::from(qualities.to_vec())),
+            ],
+        )
+        .unwrap();
+        let view_schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8View, false),
+            Field::new("description", DataType::Utf8View, true),
+            Field::new("sequence", DataType::Utf8View, false),
+            Field::new("quality_scores", DataType::Utf8View, false),
+        ]));
+        let view = RecordBatch::try_new(
+            view_schema,
+            vec![
+                Arc::new(StringViewArray::from(names.to_vec())),
+                Arc::new(StringViewArray::from(descriptions.to_vec())),
+                Arc::new(StringViewArray::from(sequences.to_vec())),
+                Arc::new(StringViewArray::from(qualities.to_vec())),
+            ],
+        )
+        .unwrap();
+
+        let mut expected = Writer::new(Vec::new());
+        for record in batch_to_fastq_records(&utf8).unwrap() {
+            expected.write_record(&record).unwrap();
+        }
+        let expected = expected.into_inner();
+
+        for batch in [&utf8, &view] {
+            let mut out = Vec::new();
+            assert_eq!(append_fastq_batch(batch, &mut out).unwrap(), 3);
+            assert_eq!(out, expected);
+        }
+    }
+
+    #[test]
+    fn test_append_fastq_batch_rejects_length_mismatch() {
+        let batch = RecordBatch::try_new(
+            create_test_schema(),
+            vec![
+                Arc::new(StringArray::from(vec!["r1"])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["ACGT"])),
+                Arc::new(StringArray::from(vec!["II"])),
+            ],
+        )
+        .unwrap();
+        let err = append_fastq_batch(&batch, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("must match quality_scores length"));
     }
 }
