@@ -988,6 +988,9 @@ impl RemoteObject {
                 timeout: {timeout}",
                 );
                 let mut builder = Gcs::default().bucket(bucket_name.as_str());
+                if let Ok(endpoint) = env::var("STORAGE_EMULATOR_HOST") {
+                    builder = builder.endpoint(&endpoint);
+                }
                 if allow_anonymous {
                     builder = builder.disable_vm_metadata();
                     // Sign with ambient credentials when they exist and go

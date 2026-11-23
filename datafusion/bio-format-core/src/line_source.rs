@@ -4,7 +4,7 @@
 //! reader. Storage backend and compression are resolved once here, so the
 //! parsers never need to know where the bytes came from.
 
-use datafusion_bio_format_core::object_storage::{
+use crate::object_storage::{
     CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_remote_stream,
     get_remote_stream_bgzf_async, get_remote_stream_gz_async, get_storage_type,
     gzip_multi_member_decoder,

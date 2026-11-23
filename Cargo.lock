@@ -1570,6 +1570,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-bio-format-genbank"
+version = "1.17.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "datafusion",
+ "datafusion-bio-format-core",
+ "indexmap",
+ "noodles-bgzf",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "datafusion-bio-format-gff"
 version = "1.17.0"
 dependencies = [

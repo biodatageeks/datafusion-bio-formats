@@ -1,0 +1,23 @@
+[package]
+name = "datafusion-bio-format-genbank"
+version = "1.17.0"
+description = "Streaming GenBank record and feature tables for Apache DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+readme = "README.md"
+
+[dependencies]
+datafusion.workspace = true
+datafusion-bio-format-core = { path = "../bio-format-core" }
+async-stream.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+noodles-bgzf.workspace = true
+indexmap = "2"
+
+[dev-dependencies]
+tempfile = "3"

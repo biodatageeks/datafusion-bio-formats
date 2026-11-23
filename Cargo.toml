@@ -11,6 +11,7 @@ members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bbi", "datafusio
     "datafusion/bio-format-structure",
     "datafusion/bio-format-foldcomp",
     "datafusion/bio-format-msa",
+    "datafusion/bio-format-genbank",
     "benchmarks/common", "benchmarks/runner",
 ]
 

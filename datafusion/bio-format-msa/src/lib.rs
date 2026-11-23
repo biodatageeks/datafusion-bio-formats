@@ -47,7 +47,7 @@
 // into them and resolved in this scope, breaking their intra-doc links.
 pub mod fastalike;
 pub mod stockholm;
-pub mod storage;
+pub use datafusion_bio_format_core::line_source as storage;
 
 pub use fastalike::{FastaLikeExec, FastaLikeTableProvider, MsaFlavor, fasta_like_schema};
 pub use stockholm::{
