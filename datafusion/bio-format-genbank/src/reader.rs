@@ -22,7 +22,8 @@ pub(crate) struct Feature {
     pub qualifiers: IndexMap<String, Vec<Option<String>>>,
     matched: bool,
     saw_qualifier: bool,
-    // Outer option marks an unquoted value. The index is absent for skipped keys.
+    // None means no active unquoted value. Some(None) consumes continuation lines
+    // for a skipped qualifier. Some(Some(i)) appends them to qualifier i.
     unquoted: Option<Option<usize>>,
 }
 #[derive(Default, PartialEq)]
@@ -131,6 +132,11 @@ impl Parser {
             {
                 "date"
             } else if token.contains("DNA") || token.contains("RNA") {
+                // The aa unit identifies a protein even if the header also
+                // includes a contradictory nucleotide molecule type.
+                if protein {
+                    continue;
+                }
                 "molecule_type"
             } else if token.len() == 3 && token.bytes().all(|c| c.is_ascii_uppercase()) {
                 "division"
@@ -431,6 +437,17 @@ fn err(s: impl Into<String>) -> DataFusionError {
 mod tests {
     use super::*;
     use crate::batch::schema;
+
+    #[test]
+    fn amino_acid_unit_takes_precedence_over_nucleotide_tokens() {
+        let all = schema(false, None, true).unwrap();
+        for fields in ["DNA linear PRI", "linear PRI RNA"] {
+            let mut parser = Parser::new(&all, false, true, vec![]);
+            parser.start(&format!("LOCUS P 4 aa {fields}")).unwrap();
+            assert_eq!(parser.record.header["molecule_type"], "protein");
+            assert_eq!(parser.record.header["division"], "PRI");
+        }
+    }
 
     #[test]
     fn reject_unknown_or_missing_locus_unit() {

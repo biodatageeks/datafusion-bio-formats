@@ -46,6 +46,8 @@ impl Layout {
         if self.blocks.is_empty() {
             return self.src.bytes(r).await;
         }
+        // Include the block containing r.start. A block starting at r.end
+        // belongs to the next range.
         let first = self
             .blocks
             .partition_point(|&(u, _)| u <= r.start)
@@ -63,8 +65,9 @@ impl Layout {
         Ok(Box::new(BufReader::new(reader.take(r.end - r.start))))
     }
     async fn align(&self, target: u64) -> io::Result<u64> {
-        // Look behind both bytes of // and CRLF. Discard the first fragment
-        // unless reading at offset zero, so indentation can never disappear.
+        // Look back four bytes for "//\r\n" plus one for the preceding newline.
+        // Discarding the first partial line then preserves a terminator ending
+        // at the target and keeps an indented "//" from looking like one.
         let mut pos = target.saturating_sub(5);
         let mut reader = self.lines(pos..self.logical).await?;
         let mut line = Vec::new();
@@ -267,4 +270,50 @@ pub(crate) async fn partitions(
     }
     slices.push(Slice::Range(layout, start..logical));
     Ok(slices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn bgzf_ranges_and_record_terminators_at_block_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocks.bgz");
+        let mut writer = bgzf::io::Writer::new(std::fs::File::create(&path).unwrap());
+        let blocks: &[&[u8]] = &[b"x\r\n//\r\n", b"  //\r\n//\r\n", b"end"];
+        for block in blocks {
+            writer.write_all(block).unwrap();
+            writer.flush().unwrap();
+        }
+        writer.finish().unwrap();
+        let physical = std::fs::metadata(&path).unwrap().len();
+        let src = Source::Local(path.display().to_string());
+        let (offsets, logical) = block_index(&src, physical).await.unwrap();
+        assert_eq!(offsets.iter().map(|p| p.0).collect::<Vec<_>>(), [0, 7, 17]);
+        let layout = Layout {
+            src,
+            physical,
+            logical,
+            blocks: offsets,
+        };
+
+        let data = blocks.concat();
+        for range in [0..7, 7..17, 17..20, 6..8] {
+            let mut bytes = Vec::new();
+            layout
+                .lines(range.clone())
+                .await
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .await
+                .unwrap();
+            assert_eq!(bytes, data[range.start as usize..range.end as usize]);
+        }
+        assert_eq!(layout.align(7).await.unwrap(), 7);
+        // Offset 13 follows an indented "//". The next real terminator ends at 17.
+        assert_eq!(layout.align(13).await.unwrap(), 17);
+        assert_eq!(layout.align(17).await.unwrap(), 17);
+    }
 }
