@@ -97,3 +97,6 @@ pub mod test_utils;
 mod tests {
     mod object_storage;
 }
+
+/// Buffered line readers for local and remote text formats.
+pub mod line_source;
