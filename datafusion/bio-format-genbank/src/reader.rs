@@ -99,9 +99,11 @@ impl Parser {
             .and_then(|n| n.parse::<i64>().ok())
             .filter(|&n| n >= 0)
             .ok_or_else(|| err("invalid LOCUS length"))?;
-        if fields.next() != Some("bp") {
-            return Err(err("expected nucleotide LOCUS length in bp"));
-        }
+        let protein = match fields.next() {
+            Some("aa") => true,
+            Some("bp") => false,
+            _ => return Err(err("expected LOCUS length in bp or aa")),
+        };
         self.record = Record {
             name: name.into(),
             length,
@@ -112,6 +114,13 @@ impl Parser {
             .iter()
             .filter(|f| f.column != "type")
             .all(|f| f.value == name);
+        if protein
+            && !self.features
+            && self.record_matches
+            && self.columns.contains("molecule_type")
+        {
+            self.record.header.insert("molecule_type", "protein".into());
+        }
         for token in fields {
             let key = if matches!(token, "linear" | "circular") {
                 self.record.circular = token == "circular";
@@ -422,6 +431,21 @@ fn err(s: impl Into<String>) -> DataFusionError {
 mod tests {
     use super::*;
     use crate::batch::schema;
+
+    #[test]
+    fn reject_unknown_or_missing_locus_unit() {
+        let all = schema(false, None, true).unwrap();
+        let mut parser = Parser::new(&all, false, true, vec![]);
+        for locus in ["LOCUS A 12", "LOCUS A 12 kb"] {
+            assert!(
+                parser
+                    .start(locus)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("bp or aa")
+            );
+        }
+    }
 
     #[test]
     fn narrow_projection_retains_no_translation_or_sequence_bytes() {

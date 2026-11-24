@@ -158,7 +158,9 @@ async fn block_index(source: &Source, size: u64) -> io::Result<(Vec<(u64, u64)>,
     while physical < size {
         let mut header = [0u8; 18];
         src.read_exact(&mut header).await?;
-        if header[..4] != [31, 139, 8, 4] || header[12..16] != [66, 67, 2, 0] {
+        // The noodles decoder expects an 18-byte BGZF header. XLEN is six,
+        // with the BC subfield at byte 12 and its two-byte BSIZE at byte 16.
+        if header[..4] != [31, 139, 8, 4] || header[10..16] != [6, 0, b'B', b'C', 2, 0] {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid BGZF block header",

@@ -57,6 +57,16 @@ fn part_fields() -> Fields {
     ])
 }
 
+fn part_builder<T: ArrayBuilder>(parts: &mut StructBuilder, index: usize) -> Result<&mut T> {
+    parts
+        .field_builders_mut()
+        .get_mut(index)
+        .and_then(|b| b.as_any_mut().downcast_mut())
+        .ok_or_else(|| {
+            DataFusionError::Internal(format!("invalid GenBank part field at index {index}"))
+        })
+}
+
 pub(crate) fn schema(
     features: bool,
     qualifiers: Option<&[String]>,
@@ -204,22 +214,21 @@ impl Batch {
                         self.bytes += parts.len() * 24;
                         let st = out.values();
                         for p in parts {
-                            st.field_builder::<Int64Builder>(0)
-                                .unwrap()
-                                .append_option(p.start);
-                            st.field_builder::<Int64Builder>(1)
-                                .unwrap()
-                                .append_option(p.end);
-                            st.field_builder::<StringBuilder>(2)
-                                .unwrap()
-                                .append_value(strand(p.reverse));
+                            part_builder::<Int64Builder>(st, 0)?.append_option(p.start);
+                            part_builder::<Int64Builder>(st, 1)?.append_option(p.end);
+                            part_builder::<StringBuilder>(st, 2)?.append_value(strand(p.reverse));
                             st.append(true);
                         }
                     }
                     out.append(loc.parts.is_some());
                 }
                 Builder::Qualifiers(out) => {
-                    for (key, values) in &feat.expect("feature schema").qualifiers {
+                    let feature = feat.ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "GenBank qualifier column requires a feature".into(),
+                        )
+                    })?;
+                    for (key, values) in &feature.qualifiers {
                         out.keys().append_value(key);
                         self.bytes += key.len();
                         for value in values {
@@ -263,4 +272,21 @@ impl Batch {
 }
 fn strand(reverse: bool) -> &'static str {
     if reverse { "-" } else { "+" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_builder_inputs_return_internal_errors() {
+        let mut batch = Batch::new(schema(true, None, false).unwrap());
+        assert!(matches!(
+            batch.push(&Record::default(), None, &Location::default()),
+            Err(DataFusionError::Internal(_))
+        ));
+        let mut parts = StructBuilder::from_fields(part_fields(), 0);
+        assert!(part_builder::<StringBuilder>(&mut parts, 0).is_err());
+        assert!(part_builder::<Int64Builder>(&mut parts, 3).is_err());
+    }
 }

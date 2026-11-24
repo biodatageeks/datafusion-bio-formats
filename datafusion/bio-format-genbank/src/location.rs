@@ -92,6 +92,7 @@ fn parse(
         if a.checked_add(1) != Some(b) && !(circular && a == length && b == 1) {
             return Err(ParseError::Invalid);
         }
+        // A site contains no base. Only half-open coordinates can express it.
         zero.then_some((a, a))
     } else {
         let (a, b) = local.split_once("..").unwrap_or((local, local));

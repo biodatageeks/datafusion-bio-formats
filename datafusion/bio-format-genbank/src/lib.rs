@@ -138,6 +138,8 @@ impl TableProvider for GenBankTableProvider {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        // Each partition counts its own matches. A single stream enforces the
+        // global pushed limit and can stop before seeking later record boundaries.
         let n = if limit.is_some() {
             1
         } else {

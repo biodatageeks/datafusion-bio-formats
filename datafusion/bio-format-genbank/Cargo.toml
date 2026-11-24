@@ -17,7 +17,8 @@ async-trait.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 noodles-bgzf.workspace = true
-indexmap = "2"
+indexmap.workspace = true
 
 [dev-dependencies]
+flate2.workspace = true
 tempfile = "3"

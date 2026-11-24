@@ -1577,6 +1577,7 @@ dependencies = [
  "async-trait",
  "datafusion",
  "datafusion-bio-format-core",
+ "flate2",
  "indexmap",
  "noodles-bgzf",
  "tempfile",
