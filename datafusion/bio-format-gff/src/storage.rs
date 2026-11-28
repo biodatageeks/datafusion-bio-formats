@@ -11,6 +11,23 @@ use noodles_gff as gff;
 use noodles_gff::feature::RecordBuf;
 use noodles_gff::feature::record_buf::Attributes;
 
+/// Decode an attribute after separating it from the GFF3 field delimiters.
+pub(crate) fn decode_attribute_value(value: &str) -> String {
+    let value = value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value);
+    if !value.contains('%') {
+        return value.to_owned();
+    }
+
+    // Decode once so an escaped percent does not start a second escape.
+    // Invalid UTF-8 becomes U+FFFD, as urllib.parse.unquote and gffutils do.
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
 /// Unified GFF record that can hold different fast parser types
 pub enum UnifiedGffRecord {
     /// Record parsed with the optimized fast parser
