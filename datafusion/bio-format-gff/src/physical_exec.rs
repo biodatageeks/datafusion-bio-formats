@@ -1,3 +1,4 @@
+use crate::filter_utils::{evaluate_filters_against_record, start_in_output_coordinates};
 use crate::storage::{GffLocalReader, GffRecordTrait, GffRemoteReader, IndexedGffReader};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
@@ -636,7 +637,12 @@ async fn get_remote_gff_stream(
             // TODO: Implement attribute extraction for remote GFF records
             let attributes_str = String::new(); // Placeholder for now
 
-            if !crate::filter_utils::evaluate_filters_against_record(&temp_record, &filters, &attributes_str) {
+            if !evaluate_filters_against_record(
+                &temp_record,
+                &filters,
+                &attributes_str,
+                coordinate_system_zero_based,
+            ) {
                 continue; // Skip this record, it doesn't pass the filters
             }
 
@@ -645,9 +651,10 @@ async fn get_remote_gff_stream(
                 chroms.push(record.reference_sequence_name().to_string());
             }
             if needs_start {
-                // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
-                let start_pos = record.start().get() as u32;
-                poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
+                poss.push(start_in_output_coordinates(
+                    record.start().get() as u32,
+                    coordinate_system_zero_based,
+                ));
             }
             if needs_end {
                 pose.push(record.end().get() as u32);
@@ -874,7 +881,12 @@ async fn get_local_gff(
 
             // Apply filters early - skip this record if it doesn't pass
             let attributes_str = record.attributes_string();
-            if !crate::filter_utils::evaluate_filters_against_record(&record, &filters, &attributes_str) {
+            if !evaluate_filters_against_record(
+                &record,
+                &filters,
+                &attributes_str,
+                coordinate_system_zero_based,
+            ) {
                 continue; // Skip this record, it doesn't pass the filters
             }
 
@@ -883,9 +895,10 @@ async fn get_local_gff(
                 chroms.push(record.reference_sequence_name());
             }
             if needs_start {
-                // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
-                let start_pos = record.start();
-                poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
+                poss.push(start_in_output_coordinates(
+                    record.start(),
+                    coordinate_system_zero_based,
+                ));
             }
             if needs_end {
                 pose.push(record.end());
@@ -1406,27 +1419,24 @@ async fn get_indexed_gff_stream(
                         phase: phase_val,
                         attributes: attributes_str.clone(),
                     };
-                    if !crate::filter_utils::evaluate_filters_against_record(
+                    if !evaluate_filters_against_record(
                         &temp_record,
                         &residual_filters,
                         &attributes_str,
+                        coordinate_system_zero_based,
                     ) {
                         continue;
                     }
                 }
 
-                // Convert coordinates
-                let start_val = if coordinate_system_zero_based {
-                    start_1based - 1
-                } else {
-                    start_1based
-                };
-
                 if needs_chrom {
                     chroms.push(chrom);
                 }
                 if needs_start {
-                    poss.push(start_val);
+                    poss.push(start_in_output_coordinates(
+                        start_1based,
+                        coordinate_system_zero_based,
+                    ));
                 }
                 if needs_end {
                     pose.push(end_1based);
