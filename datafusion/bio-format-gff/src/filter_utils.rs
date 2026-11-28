@@ -64,41 +64,65 @@ fn can_push_down_gff_attribute_in_list(in_list_expr: &InList) -> bool {
     false
 }
 
-/// Evaluates filter expressions against a GFF record.
+/// Convert a 1-based GFF start to the coordinate system exposed to the query.
+pub(crate) fn start_in_output_coordinates(start: u32, zero_based: bool) -> u32 {
+    start.saturating_sub(u32::from(zero_based))
+}
+
+/// Evaluates filter expressions against a GFF record in the output coordinate system.
 /// Returns true if the record passes all filters, false otherwise.
 pub fn evaluate_filters_against_record<T: GffRecordTrait>(
     record: &T,
     filters: &[Expr],
     attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     if filters.is_empty() {
         return true;
     }
 
-    filters
-        .iter()
-        .all(|filter| evaluate_single_filter(record, filter, attributes_str))
+    filters.iter().all(|filter| {
+        evaluate_single_filter(record, filter, attributes_str, coordinate_system_zero_based)
+    })
 }
 
 fn evaluate_single_filter<T: GffRecordTrait>(
     record: &T,
     filter: &Expr,
     attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     match filter {
         // AND expressions
         Expr::BinaryExpr(binary_expr) if matches!(binary_expr.op, Operator::And) => {
-            evaluate_single_filter(record, &binary_expr.left, attributes_str)
-                && evaluate_single_filter(record, &binary_expr.right, attributes_str)
+            evaluate_single_filter(
+                record,
+                &binary_expr.left,
+                attributes_str,
+                coordinate_system_zero_based,
+            ) && evaluate_single_filter(
+                record,
+                &binary_expr.right,
+                attributes_str,
+                coordinate_system_zero_based,
+            )
         }
         // Other binary expressions: column op literal
-        Expr::BinaryExpr(binary_expr) => {
-            evaluate_binary_filter(record, binary_expr, attributes_str)
-        }
+        Expr::BinaryExpr(binary_expr) => evaluate_binary_filter(
+            record,
+            binary_expr,
+            attributes_str,
+            coordinate_system_zero_based,
+        ),
         Expr::Between(between_expr) => {
-            evaluate_between_filter(record, between_expr, attributes_str)
+            evaluate_between_filter(record, between_expr, coordinate_system_zero_based)
         }
-        Expr::InList(in_list_expr) => evaluate_in_list_filter(record, in_list_expr, attributes_str),
+        Expr::InList(in_list_expr) => evaluate_in_list_filter(
+            record,
+            in_list_expr,
+            attributes_str,
+            coordinate_system_zero_based,
+        ),
         _ => true, // Unsupported expressions are treated as pass-through
     }
 }
@@ -107,6 +131,7 @@ fn evaluate_binary_filter<T: GffRecordTrait>(
     record: &T,
     binary_expr: &datafusion::logical_expr::BinaryExpr,
     attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     if let Expr::Column(column) = &*binary_expr.left
         && let Expr::Literal(literal, _) = &*binary_expr.right
@@ -119,7 +144,8 @@ fn evaluate_binary_filter<T: GffRecordTrait>(
                 evaluate_string_comparison(&record_value, literal, &binary_expr.op)
             }
             "start" => {
-                let record_value = record.start();
+                let record_value =
+                    start_in_output_coordinates(record.start(), coordinate_system_zero_based);
                 evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op)
             }
             "end" => {
@@ -157,7 +183,7 @@ fn evaluate_binary_filter<T: GffRecordTrait>(
 fn evaluate_between_filter<T: GffRecordTrait>(
     record: &T,
     between_expr: &Between,
-    _attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     if let Expr::Column(column) = &*between_expr.expr
         && let (Expr::Literal(low_literal, _), Expr::Literal(high_literal, _)) =
@@ -168,7 +194,7 @@ fn evaluate_between_filter<T: GffRecordTrait>(
 
         return match field_name.as_str() {
             "start" => evaluate_between_comparison(
-                record.start() as f64,
+                start_in_output_coordinates(record.start(), coordinate_system_zero_based) as f64,
                 low_literal,
                 high_literal,
                 negated,
@@ -186,6 +212,7 @@ fn evaluate_in_list_filter<T: GffRecordTrait>(
     record: &T,
     in_list_expr: &InList,
     attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     if let Expr::Column(column) = &*in_list_expr.expr {
         let field_name = &column.name;
@@ -206,6 +233,11 @@ fn evaluate_in_list_filter<T: GffRecordTrait>(
 
         let contains = match field_name.as_str() {
             "chrom" => values.contains(&record.reference_sequence_name()),
+            "start" => values.contains(
+                &start_in_output_coordinates(record.start(), coordinate_system_zero_based)
+                    .to_string(),
+            ),
+            "end" => values.contains(&record.end().to_string()),
             "type" => values.contains(&record.ty()),
             "source" => values.contains(&record.source()),
             "strand" => values.contains(&record.strand()),
