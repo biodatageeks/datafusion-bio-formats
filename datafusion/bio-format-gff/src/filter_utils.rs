@@ -320,22 +320,7 @@ fn extract_attribute_value(field_name: &str, attributes_str: &str) -> Option<Str
             let key = &pair[..eq_pos];
             if key == field_name {
                 let value = &pair[eq_pos + 1..];
-
-                // Handle quoted and URL-encoded values
-                let decoded_value = if value.starts_with('"') && value.ends_with('"') {
-                    value[1..value.len() - 1].to_string()
-                } else if value.contains('%') {
-                    value
-                        .replace("%3B", ";")
-                        .replace("%3D", "=")
-                        .replace("%26", "&")
-                        .replace("%2C", ",")
-                        .replace("%09", "\t")
-                } else {
-                    value.to_string()
-                };
-
-                return Some(decoded_value);
+                return Some(crate::storage::decode_attribute_value(value));
             }
         }
     }

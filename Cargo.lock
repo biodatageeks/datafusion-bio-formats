@@ -1590,6 +1590,7 @@ dependencies = [
  "noodles-gff",
  "noodles-tabix",
  "opendal",
+ "percent-encoding",
  "tokio",
  "tokio-util",
  "tracing",

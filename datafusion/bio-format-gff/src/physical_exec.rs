@@ -220,27 +220,10 @@ fn parse_gff_attributes_to_vec(attributes_str: &str) -> Vec<Attribute> {
             let key = &pair[..eq_pos];
             let value = &pair[eq_pos + 1..];
 
-            // Only do expensive operations when absolutely necessary
-            let decoded_value = if value.starts_with('"') && value.ends_with('"') {
-                // Remove quotes - avoid string allocation until necessary
-                value[1..value.len() - 1].to_string()
-            } else if value.contains('%') {
-                // Only do URL decoding if % is found
-                value
-                    .replace("%3B", ";")
-                    .replace("%3D", "=")
-                    .replace("%26", "&")
-                    .replace("%2C", ",")
-                    .replace("%09", "\t")
-            } else {
-                // Most common case - direct string conversion
-                value.to_string()
-            };
-
             // Create Attribute struct directly - preserves order
             attributes.push(Attribute {
                 tag: key.to_string(),
-                value: Some(decoded_value),
+                value: Some(crate::storage::decode_attribute_value(value)),
             });
         }
     }
@@ -303,18 +286,7 @@ fn load_attributes_unnest_from_string(
                 let key = &pair[..eq_pos];
                 if wanted.contains(key) {
                     let value = &pair[eq_pos + 1..];
-                    let decoded_value = if value.starts_with('"') && value.ends_with('"') {
-                        value[1..value.len() - 1].to_string()
-                    } else if value.contains('%') {
-                        value
-                            .replace("%3B", ";")
-                            .replace("%3D", "=")
-                            .replace("%26", "&")
-                            .replace("%2C", ",")
-                            .replace("%09", "\t")
-                    } else {
-                        value.to_string()
-                    };
+                    let decoded_value = crate::storage::decode_attribute_value(value);
                     attributes_map.insert(key.to_string(), decoded_value);
                 }
             }
